@@ -2,9 +2,7 @@
 
 `spaceship` 是面向 AstrBot 的远程节点控制方案仓库。
 
-当前主线实现已经不是独立 plugin，而是：
-
-- `agent/`：Go 编写的跨平台节点客户端，负责连接 AstrBot 网关并执行远端任务
+`agent/`：Go 编写的跨平台节点客户端，负责连接 AstrBot 网关并执行远端任务
 
 当前 AstrBot 侧的正式实现位于本体仓库中的 `astrbot/core/spaceship/`。
 
@@ -179,4 +177,5 @@ go build -trimpath -ldflags="-s -w" -o spaceship-agent .\cmd\spaceship-agent
 - 输出分块优化
 - 审计落库
 - 更完整的连接恢复与任务恢复策略
+
 
