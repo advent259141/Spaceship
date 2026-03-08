@@ -71,6 +71,17 @@ func (d Dispatcher) Dispatch(task protocol.TaskSpec) (Result, error) {
 			return Result{}, err
 		}
 		return Result{Stdout: content, Truncated: truncated}, nil
+	case "write_file":
+		content, err := d.fileops.Write(fileops.WriteRequest{
+			Path:       stringArg(task.Args, "path"),
+			Content:    stringArg(task.Args, "content"),
+			Append:     boolArg(task.Args, "append"),
+			CreateDirs: boolArgWithDefault(task.Args, "create_dirs", true),
+		})
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{Stdout: content}, nil
 	default:
 		return Result{}, fmt.Errorf("unsupported task type: %s", task.TaskType)
 	}
@@ -91,6 +102,18 @@ func boolArg(args map[string]any, key string) bool {
 		return false
 	}
 	flag, _ := value.(bool)
+	return flag
+}
+
+func boolArgWithDefault(args map[string]any, key string, fallback bool) bool {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return fallback
+	}
+	flag, ok := value.(bool)
+	if !ok {
+		return fallback
+	}
 	return flag
 }
 

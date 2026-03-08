@@ -20,6 +20,13 @@ type ListDirRequest struct {
 	Limit      int
 }
 
+type WriteRequest struct {
+	Path       string
+	Content    string
+	Append     bool
+	CreateDirs bool
+}
+
 type Service struct{}
 
 type entry struct {
@@ -121,4 +128,49 @@ func (Service) ListDir(request ListDirRequest) (string, bool, error) {
 		return "", false, err
 	}
 	return string(encoded), truncated, nil
+}
+
+func (Service) Write(request WriteRequest) (string, error) {
+	if request.Path == "" {
+		return "", errors.New("path is required")
+	}
+
+	if request.CreateDirs {
+		parent := filepath.Dir(request.Path)
+		if parent != "" && parent != "." {
+			if err := os.MkdirAll(parent, 0o755); err != nil {
+				return "", err
+			}
+		}
+	}
+
+	flag := os.O_CREATE | os.O_WRONLY
+	if request.Append {
+		flag |= os.O_APPEND
+	} else {
+		flag |= os.O_TRUNC
+	}
+
+	file, err := os.OpenFile(request.Path, flag, 0o644)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	written, err := file.WriteString(request.Content)
+	if err != nil {
+		return "", err
+	}
+
+	payload := map[string]any{
+		"path":          request.Path,
+		"bytes_written": written,
+		"append":        request.Append,
+		"created_dirs":  request.CreateDirs,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }

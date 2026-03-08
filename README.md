@@ -14,7 +14,7 @@ Spaceship 的目标是把 AstrBot 扩展成一个远端节点网关：
 
 - 远端机器运行 Go agent 并与 AstrBot 建立 WebSocket 长连接
 - AstrBot 作为控制面向在线节点派发任务
-- LLM 可以通过工具查看节点、执行命令、列目录、读取文件
+- LLM 可以通过工具查看节点、执行命令、列目录、读取文件、写入文件
 - WebUI 可以管理 Spaceship 配置并查看节点状态
 
 ## 当前架构
@@ -49,7 +49,7 @@ Go agent 当前负责：
 - 接收 `node.welcome`
 - 定时发送 `node.heartbeat`
 - 接收 `task.dispatch`
-- 执行 `exec`、`list_dir`、`read_file`
+- 执行 `exec`、`list_dir`、`read_file`、`write_file`
 - 回传 `task.accepted`、`task.started`、`task.output`、`task.result`
 - 在连接断开时自动退避重连
 
@@ -92,11 +92,22 @@ Go agent 当前负责：
 1. AstrBot core 子模块化 `spaceship`
 2. WebUI 配置页面、节点列表与节点详情接口
 3. WebSocket 网关接入路径 `/api/spaceship/ws`
-4. LLM 工具注册：`listnode`、`getnodeinfo`、`executeshell`、`listdir`、`readfile`
+4. LLM 工具注册：`listnode`、`getnodeinfo`、`executeshell`、`listdir`、`readfile`、`writefile`
 5. Go agent 的 `.env` 配置加载
 6. Go agent 的基本日志输出
 7. Go agent 的自动重连与退避重试参数
 8. 最小联调闭环：hello / welcome / heartbeat / task.dispatch / task.result
+
+## 当前可用工具
+
+当前已经接入 AstrBot 的 LLM 工具有：
+
+- `listnode`：查看当前在线或指定状态的节点列表
+- `getnodeinfo`：查看指定节点的详细信息
+- `executeshell`：在指定节点上执行 shell 命令
+- `listdir`：查看指定节点上的目录内容
+- `readfile`：读取指定节点上的文本文件内容
+- `writefile`：向指定节点上的文件写入文本内容，支持覆盖或追加
 
 ## Go agent 配置
 
@@ -163,7 +174,6 @@ go build -trimpath -ldflags="-s -w" -o spaceship-agent .\cmd\spaceship-agent
 
 仍在继续完善的部分：
 
-- `writefile`
 - `task.cancel`
 - 更细粒度权限控制
 - 输出分块优化
