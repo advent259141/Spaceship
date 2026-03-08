@@ -1,45 +1,68 @@
 # spaceship
 
-`spaceship` 是面向 AstrBot 的远程节点控制方案原型仓库。
+`spaceship` 是面向 AstrBot 的远程节点控制方案仓库。
 
-当前仓库按两部分拆分：
+当前主线实现已经不是独立 plugin，而是：
 
-- `agent/`：Go 编写的跨平台节点客户端，首期支持 Linux 与 Windows
-- `plugin/`：AstrBot 侧的 `spaceship` 插件骨架，负责节点管理、任务调度、工具路由与审计
-- `plans/`：架构设计文档，当前主文档为 `plans/spaceship-astrbot-architecture.md`
+- `agent/`：Go 编写的跨平台节点客户端，负责连接 AstrBot 网关并执行远端任务
 
-## 首期技术选型
+当前 AstrBot 侧的正式实现位于本体仓库中的 `astrbot/core/spaceship/`。
 
-### Go agent
-- Go `1.23`
-- WebSocket：`github.com/gorilla/websocket`
-- 配置：标准库 `encoding/json`
-- 日志：标准库 `log/slog`
-- 命令执行：标准库 `os/exec`
+## 当前目标
 
-### AstrBot plugin
-插件骨架按 Python 目录结构组织，目标是表达控制面模块边界，并逐步对齐 AstrBot 的 computer layer：
+Spaceship 的目标是把 AstrBot 扩展成一个远端节点网关：
 
-- `manifest`：插件元信息占位
-- `models`：节点、任务、协议、工具请求模型
-- `storage`：SQLite 存储接口
-- `session_hub`：WebSocket 会话管理
-- `node_registry`：节点注册与在线状态
-- `dispatcher`：任务分发与结果聚合
-- `runtime_adapter`：`SpaceshipNodeBooter` 与远端 shell/fs 组件
-- `booter_factory`：运行时 booter 选择入口
-- `tool_adapter`：AstrBot 工具适配层
-- `policy_engine`：权限与路径策略
-- `audit`：任务审计与安全审计
+- 远端机器运行 Go agent 并与 AstrBot 建立 WebSocket 长连接
+- AstrBot 作为控制面向在线节点派发任务
+- LLM 可以通过工具查看节点、执行命令、列目录、读取文件
+- WebUI 可以管理 Spaceship 配置并查看节点状态
 
-## 目录规划
+## 当前架构
+
+### AstrBot 本体侧
+
+主实现已经落在 AstrBot core 子模块：
+
+- `astrbot/core/spaceship/models.py`
+- `astrbot/core/spaceship/session.py`
+- `astrbot/core/spaceship/dispatcher.py`
+- `astrbot/core/spaceship/gateway.py`
+- `astrbot/core/spaceship/tools.py`
+- `astrbot/core/spaceship/tool_registry.py`
+- `astrbot/core/spaceship/components.py`
+- `astrbot/core/spaceship/runtime.py`
+
+配套接入点包括：
+
+- `astrbot/core/core_lifecycle.py`
+- `astrbot/dashboard/routes/spaceship.py`
+- `astrbot/core/config/default.py`
+- dashboard 前端页面、路由、侧边栏和 i18n
+
+### Go agent 侧
+
+Go agent 当前负责：
+
+- 读取 `.env` 或环境变量配置
+- 与 AstrBot 网关建立 WebSocket 连接
+- 发送 `node.hello`
+- 接收 `node.welcome`
+- 定时发送 `node.heartbeat`
+- 接收 `task.dispatch`
+- 执行 `exec`、`list_dir`、`read_file`
+- 回传 `task.accepted`、`task.started`、`task.output`、`task.result`
+- 在连接断开时自动退避重连
+
+## 目录说明
 
 ```text
 .
 ├─ README.md
 ├─ plans/
-│  └─ spaceship-astrbot-architecture.md
+│  ├─ spaceship-astrbot-architecture.md
+│  └─ spaceship-current-status.md
 ├─ agent/
+│  ├─ .env
 │  ├─ go.mod
 │  ├─ go.sum
 │  ├─ cmd/
@@ -59,35 +82,91 @@
 │     └─ wsclient/
 └─ plugin/
    └─ spaceship/
-      ├─ app.py
-      ├─ README.md
-      ├─ manifest.json
-      ├─ __init__.py
-      ├─ audit/
-      ├─ booter_factory/
-      ├─ dispatcher/
-      ├─ models/
-      ├─ node_registry/
-      ├─ policy_engine/
-      ├─ runtime_adapter/
-      ├─ session_hub/
-      ├─ storage/
-      └─ tool_adapter/
+      └─ ... (legacy prototype)
 ```
 
-## 当前落地范围
+## 已完成能力
 
 当前已经落地：
 
-1. Go agent 的协议模型、配置、WebSocket 客户端骨架与 shell 执行器
-2. AstrBot 插件的目录结构、核心服务、`SpaceshipNodeBooter` 与统一 runtime 入口
-3. 节点 hello、welcome、heartbeat、task.dispatch、task.output、task.result 的最小事件闭环
-4. 最小可扩展的数据模型与说明文档
+1. AstrBot core 子模块化 `spaceship`
+2. WebUI 配置页面、节点列表与节点详情接口
+3. WebSocket 网关接入路径 `/api/spaceship/ws`
+4. LLM 工具注册：`listnode`、`getnodeinfo`、`executeshell`、`listdir`、`readfile`
+5. Go agent 的 `.env` 配置加载
+6. Go agent 的基本日志输出
+7. Go agent 的自动重连与退避重试参数
+8. 最小联调闭环：hello / welcome / heartbeat / task.dispatch / task.result
 
-## 下一步
+## Go agent 配置
 
-1. 在 plugin 侧接入真实 WebSocket 路由或 AstrBot 生命周期入口
-2. 补齐 `task.cancel`、文件读取与更细粒度输出分块
-3. 对齐 AstrBot `shell.exec(...)` 与 `fs.read_file(...)` 的返回语义
-4. 补齐 SQLite 持久化与审计落库
-5. 接入 AstrBot 实际工具注册与节点管理接口
+agent 目录下提供了 `.env` 文件，可直接修改：
+
+```env
+SPACESHIP_SERVER_URL=ws://127.0.0.1:6185/api/spaceship/ws
+SPACESHIP_NODE_ID=dev-node-01
+SPACESHIP_NODE_ALIAS=Local Dev Node
+SPACESHIP_NODE_TOKEN=change-me
+SPACESHIP_LOG_LEVEL=info
+SPACESHIP_HEARTBEAT_INTERVAL=20s
+SPACESHIP_RECONNECT_MIN_DELAY=1s
+SPACESHIP_RECONNECT_MAX_DELAY=30s
+```
+
+关键项说明：
+
+- `SPACESHIP_SERVER_URL`：AstrBot 的 WebSocket 网关地址
+- `SPACESHIP_NODE_ID`：节点唯一 ID
+- `SPACESHIP_NODE_TOKEN`：需要与 AstrBot 中的 `bootstrap_token` 一致
+- `SPACESHIP_HEARTBEAT_INTERVAL`：心跳间隔
+- `SPACESHIP_RECONNECT_MIN_DELAY`：最小重连等待时间
+- `SPACESHIP_RECONNECT_MAX_DELAY`：最大重连等待时间
+
+## 运行方式
+
+### Windows 本地运行
+
+```powershell
+Set-Location .\agent
+go run .\cmd\spaceship-agent
+```
+
+### 编译后运行
+
+```powershell
+Set-Location .\agent
+go build -trimpath -ldflags="-s -w" -o spaceship-agent.exe .\cmd\spaceship-agent
+.\spaceship-agent.exe
+```
+
+### 编译 Linux ELF
+
+```powershell
+Set-Location .\agent
+$env:GOOS="linux"
+$env:GOARCH="amd64"
+$env:CGO_ENABLED="0"
+go build -trimpath -ldflags="-s -w" -o spaceship-agent .\cmd\spaceship-agent
+```
+
+## 当前状态
+
+当前项目已经进入联调清障阶段，而不是纯方案阶段。
+
+已经稳定完成的部分：
+
+- 配置持久化
+- dashboard 路由接入
+- core 工具注册
+- WebSocket 上下文问题修复
+- 基础节点能力和远端文件/命令调用链路
+
+仍在继续完善的部分：
+
+- `writefile`
+- `task.cancel`
+- 更细粒度权限控制
+- 输出分块优化
+- 审计落库
+- 更完整的连接恢复与任务恢复策略
+
