@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"runtime"
@@ -27,12 +28,38 @@ type ExecResult struct {
 	Duration time.Duration
 }
 
-type Runner struct{}
+type Runner struct {
+	logger *slog.Logger
+}
 
-func (Runner) Exec(request ExecRequest) (ExecResult, error) {
+func NewRunner(logger *slog.Logger) Runner {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return Runner{logger: logger}
+}
+
+func (r Runner) Exec(request ExecRequest) (ExecResult, error) {
 	if request.Command == "" {
 		return ExecResult{}, errors.New("command is required")
 	}
+
+	workingDir := request.CWD
+	if workingDir == "" {
+		workingDir = "."
+	}
+	logger := r.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	logger.Info("executing shell command",
+		"cwd", workingDir,
+		"timeout", request.Timeout.String(),
+		"background", request.Background,
+		"env_keys", len(request.Env),
+		"command", request.Command,
+	)
 
 	startedAt := time.Now()
 	ctx := context.Background()
@@ -48,13 +75,24 @@ func (Runner) Exec(request ExecRequest) (ExecResult, error) {
 
 	if request.Background {
 		if err := command.Start(); err != nil {
+			logger.Error("failed to start shell command",
+				"cwd", workingDir,
+				"background", true,
+				"error", err,
+			)
 			return ExecResult{}, err
 		}
-		return ExecResult{
+		result := ExecResult{
 			PID:      command.Process.Pid,
 			ExitCode: 0,
 			Duration: time.Since(startedAt),
-		}, nil
+		}
+		logger.Info("shell command started in background",
+			"cwd", workingDir,
+			"pid", result.PID,
+			"duration_ms", result.Duration.Milliseconds(),
+		)
+		return result, nil
 	}
 
 	var stdout bytes.Buffer
@@ -72,8 +110,26 @@ func (Runner) Exec(request ExecRequest) (ExecResult, error) {
 	}
 
 	if err != nil && result.ExitCode == 0 && !result.TimedOut {
+		logger.Error("shell command failed before exit status was available",
+			"cwd", workingDir,
+			"duration_ms", result.Duration.Milliseconds(),
+			"error", err,
+		)
 		return result, err
 	}
+
+	level := slog.LevelInfo
+	if result.TimedOut || result.ExitCode != 0 {
+		level = slog.LevelWarn
+	}
+	logger.Log(context.Background(), level, "shell command completed",
+		"cwd", workingDir,
+		"exit_code", result.ExitCode,
+		"timed_out", result.TimedOut,
+		"stdout_bytes", len(result.Stdout),
+		"stderr_bytes", len(result.Stderr),
+		"duration_ms", result.Duration.Milliseconds(),
+	)
 	return result, nil
 }
 

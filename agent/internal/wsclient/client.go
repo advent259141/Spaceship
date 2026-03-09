@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"spaceship/agent/internal/config"
 	"spaceship/agent/internal/executor"
 	"spaceship/agent/internal/heartbeat"
@@ -17,6 +16,8 @@ import (
 	"spaceship/agent/internal/protocol"
 	"spaceship/agent/internal/registrar"
 	"spaceship/agent/internal/shell"
+
+	"github.com/gorilla/websocket"
 )
 
 type Client struct {
@@ -106,7 +107,7 @@ func (c *Client) runSession(ctx context.Context, cfg config.Config) error {
 		"resume_support", welcome.ResumeSupport,
 	)
 
-	execDispatcher := executor.NewDispatcher(shell.Runner{})
+	execDispatcher := executor.NewDispatcher(c.logger, shell.NewRunner(c.logger))
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- c.readLoop(ctx, conn, cfg, execDispatcher)
@@ -165,6 +166,13 @@ func (c *Client) NewHelloEnvelope(nodeID string, payload protocol.HelloPayload, 
 func (c *Client) sendHello(conn *websocket.Conn, cfg config.Config) error {
 	meta := metadata.Collect()
 	payload := registrar.Service{}.BuildHelloPayload(cfg.Token, meta.Hostname, cfg.Alias, cfg.Platform, cfg.Arch)
+	c.logger.Debug("building node.hello payload",
+		"node_id", cfg.NodeID,
+		"hostname", meta.Hostname,
+		"platform", payload.Platform,
+		"arch", payload.Arch,
+		"capabilities", payload.DeclaredCapabilities,
+	)
 	return c.writeJSON(conn, c.NewHelloEnvelope(cfg.NodeID, payload, nowRFC3339()))
 }
 
@@ -173,6 +181,11 @@ func (c *Client) readWelcome(conn *websocket.Conn) (protocol.WelcomePayload, err
 	if err := conn.ReadJSON(&envelope); err != nil {
 		return protocol.WelcomePayload{}, err
 	}
+	c.logger.Debug("websocket message received during bootstrap",
+		"type", envelope.Type,
+		"request_id", envelope.RequestID,
+		"session_id", envelope.SessionID,
+	)
 	if envelope.Type != protocol.EventNodeWelcome {
 		return protocol.WelcomePayload{}, fmt.Errorf("unexpected event: %s", envelope.Type)
 	}
@@ -209,6 +222,13 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, cfg config.
 		if err := conn.ReadJSON(&raw); err != nil {
 			return err
 		}
+
+		c.logger.Debug("websocket event received",
+			"type", raw.Type,
+			"request_id", raw.RequestID,
+			"session_id", raw.SessionID,
+			"seq", raw.Seq,
+		)
 
 		switch raw.Type {
 		case protocol.EventTaskDispatch:
@@ -299,6 +319,10 @@ func (c *Client) handleTask(conn *websocket.Conn, nodeID string, raw protocol.Ra
 	}
 
 	if result.Stdout != "" {
+		c.logger.Debug("sending task stdout chunk",
+			"task_id", task.TaskID,
+			"bytes", len(result.Stdout),
+		)
 		_ = c.writeJSON(conn, protocol.Envelope[protocol.TaskOutputPayload]{
 			Type:      protocol.EventTaskOutput,
 			RequestID: raw.RequestID,
@@ -315,6 +339,10 @@ func (c *Client) handleTask(conn *websocket.Conn, nodeID string, raw protocol.Ra
 		})
 	}
 	if result.Stderr != "" {
+		c.logger.Debug("sending task stderr chunk",
+			"task_id", task.TaskID,
+			"bytes", len(result.Stderr),
+		)
 		_ = c.writeJSON(conn, protocol.Envelope[protocol.TaskOutputPayload]{
 			Type:      protocol.EventTaskOutput,
 			RequestID: raw.RequestID,
@@ -371,6 +399,16 @@ func (c *Client) handleTask(conn *websocket.Conn, nodeID string, raw protocol.Ra
 func (c *Client) writeJSON(conn *websocket.Conn, payload any) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+
+	if envelope := describeEnvelope(payload); envelope != nil {
+		c.logger.Debug("sending websocket event",
+			"type", envelope.Type,
+			"request_id", envelope.RequestID,
+			"session_id", envelope.SessionID,
+			"node_id", envelope.NodeID,
+			"seq", envelope.Seq,
+		)
+	}
 	return conn.WriteJSON(payload)
 }
 
@@ -382,6 +420,34 @@ func (c *Client) writeControl(conn *websocket.Conn, messageType int) error {
 
 func nowRFC3339() string {
 	return time.Now().Format(time.RFC3339)
+}
+
+type envelopeSummary struct {
+	Type      string
+	RequestID string
+	SessionID string
+	NodeID    string
+	Seq       uint64
+}
+
+func describeEnvelope(payload any) *envelopeSummary {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+
+	var raw protocol.RawEnvelope
+	if err := json.Unmarshal(encoded, &raw); err != nil {
+		return nil
+	}
+
+	return &envelopeSummary{
+		Type:      string(raw.Type),
+		RequestID: raw.RequestID,
+		SessionID: raw.SessionID,
+		NodeID:    raw.NodeID,
+		Seq:       raw.Seq,
+	}
 }
 
 func backoffDelay(attempt int, minDelay time.Duration, maxDelay time.Duration) time.Duration {
