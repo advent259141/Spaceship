@@ -4,17 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"spaceship/agent/internal/config"
 	"spaceship/agent/internal/executor"
-	"spaceship/agent/internal/heartbeat"
-	"spaceship/agent/internal/metadata"
 	"spaceship/agent/internal/protocol"
-	"spaceship/agent/internal/registrar"
 	"spaceship/agent/internal/shell"
 
 	"github.com/gorilla/websocket"
@@ -27,6 +23,7 @@ type Client struct {
 	mu      sync.Mutex
 	writeMu sync.Mutex
 	seq     uint64
+	cancels sync.Map // map[taskID string] -> context.CancelFunc
 }
 
 func New(serverURL string, logger *slog.Logger) *Client {
@@ -151,64 +148,7 @@ func (c *Client) NextSeq() uint64 {
 	return c.seq
 }
 
-func (c *Client) NewHelloEnvelope(nodeID string, payload protocol.HelloPayload, ts string) protocol.Envelope[protocol.HelloPayload] {
-	return protocol.Envelope[protocol.HelloPayload]{
-		Type:      protocol.EventNodeHello,
-		RequestID: "req_boot_001",
-		SessionID: "",
-		NodeID:    nodeID,
-		Seq:       c.NextSeq(),
-		TS:        ts,
-		Payload:   payload,
-	}
-}
 
-func (c *Client) sendHello(conn *websocket.Conn, cfg config.Config) error {
-	meta := metadata.Collect()
-	payload := registrar.Service{}.BuildHelloPayload(cfg.Token, meta.Hostname, cfg.Alias, cfg.Platform, cfg.Arch)
-	c.logger.Debug("building node.hello payload",
-		"node_id", cfg.NodeID,
-		"hostname", meta.Hostname,
-		"platform", payload.Platform,
-		"arch", payload.Arch,
-		"capabilities", payload.DeclaredCapabilities,
-	)
-	return c.writeJSON(conn, c.NewHelloEnvelope(cfg.NodeID, payload, nowRFC3339()))
-}
-
-func (c *Client) readWelcome(conn *websocket.Conn) (protocol.WelcomePayload, error) {
-	var envelope protocol.RawEnvelope
-	if err := conn.ReadJSON(&envelope); err != nil {
-		return protocol.WelcomePayload{}, err
-	}
-	c.logger.Debug("websocket message received during bootstrap",
-		"type", envelope.Type,
-		"request_id", envelope.RequestID,
-		"session_id", envelope.SessionID,
-	)
-	if envelope.Type != protocol.EventNodeWelcome {
-		return protocol.WelcomePayload{}, fmt.Errorf("unexpected event: %s", envelope.Type)
-	}
-	var payload protocol.WelcomePayload
-	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
-		return protocol.WelcomePayload{}, err
-	}
-	return payload, nil
-}
-
-func (c *Client) sendHeartbeat(conn *websocket.Conn, nodeID string) error {
-	payload := heartbeat.BuildPayload(0, 0, 0, "")
-	envelope := protocol.Envelope[protocol.HeartbeatPayload]{
-		Type:      protocol.EventNodeHeartbeat,
-		RequestID: fmt.Sprintf("hb_%d", time.Now().Unix()),
-		SessionID: "",
-		NodeID:    nodeID,
-		Seq:       c.NextSeq(),
-		TS:        nowRFC3339(),
-		Payload:   payload,
-	}
-	return c.writeJSON(conn, envelope)
-}
 
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, cfg config.Config, dispatcher executor.Dispatcher) error {
 	for {
@@ -242,6 +182,23 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, cfg config.
 				"requested_by", task.RequestedBy,
 			)
 			go c.handleTask(conn, cfg.NodeID, raw, task, dispatcher)
+		case protocol.EventTaskCancel:
+			var cancel protocol.TaskCancelPayload
+			if err := json.Unmarshal(raw.Payload, &cancel); err != nil {
+				c.logger.Warn("invalid task.cancel payload", "error", err)
+				continue
+			}
+			c.logger.Info("task.cancel received",
+				"task_id", cancel.TaskID,
+				"reason", cancel.Reason,
+			)
+			if fn, loaded := c.cancels.LoadAndDelete(cancel.TaskID); loaded {
+				fn.(context.CancelFunc)()
+			} else {
+				c.logger.Warn("task.cancel: no in-flight task found",
+					"task_id", cancel.TaskID,
+				)
+			}
 		default:
 			c.logger.Debug("ignoring unsupported websocket event",
 				"type", raw.Type,
@@ -257,6 +214,14 @@ func (c *Client) handleTask(conn *websocket.Conn, nodeID string, raw protocol.Ra
 		"task_type", task.TaskType,
 		"node_id", nodeID,
 	)
+
+	// Create a cancellable context and register it so task.cancel can trigger it.
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancels.Store(task.TaskID, cancel)
+	defer func() {
+		c.cancels.Delete(task.TaskID)
+		cancel()
+	}()
 
 	accepted := protocol.Envelope[protocol.TaskAcceptedPayload]{
 		Type:      protocol.EventTaskAccepted,
@@ -294,7 +259,44 @@ func (c *Client) handleTask(conn *websocket.Conn, nodeID string, raw protocol.Ra
 		return
 	}
 
-	result, err := dispatcher.Dispatch(task)
+	// Use DispatchStream for all task types.
+	// For exec tasks, output is streamed line-by-line in real time.
+	// For file ops, the complete result is delivered as a single chunk.
+	var stdoutBytes, stderrBytes int64
+
+	onChunk := func(chunk shell.OutputChunk) {
+		var offset *int64
+		if chunk.Stream == "stdout" {
+			offset = &stdoutBytes
+		} else {
+			offset = &stderrBytes
+		}
+
+		c.logger.Debug("sending task output chunk",
+			"task_id", task.TaskID,
+			"stream", chunk.Stream,
+			"offset", *offset,
+			"bytes", len(chunk.Data),
+		)
+
+		_ = c.writeJSON(conn, protocol.Envelope[protocol.TaskOutputPayload]{
+			Type:      protocol.EventTaskOutput,
+			RequestID: raw.RequestID,
+			SessionID: raw.SessionID,
+			NodeID:    nodeID,
+			Seq:       c.NextSeq(),
+			TS:        nowRFC3339(),
+			Payload: protocol.TaskOutputPayload{
+				TaskID: task.TaskID,
+				Stream: chunk.Stream,
+				Offset: *offset,
+				Chunk:  chunk.Data,
+			},
+		})
+		*offset += int64(len(chunk.Data))
+	}
+
+	result, err := dispatcher.DispatchStream(ctx, task, onChunk)
 	if err != nil {
 		c.logger.Error("task execution failed",
 			"task_id", task.TaskID,
@@ -318,49 +320,10 @@ func (c *Client) handleTask(conn *websocket.Conn, nodeID string, raw protocol.Ra
 		return
 	}
 
-	if result.Stdout != "" {
-		c.logger.Debug("sending task stdout chunk",
-			"task_id", task.TaskID,
-			"bytes", len(result.Stdout),
-		)
-		_ = c.writeJSON(conn, protocol.Envelope[protocol.TaskOutputPayload]{
-			Type:      protocol.EventTaskOutput,
-			RequestID: raw.RequestID,
-			SessionID: raw.SessionID,
-			NodeID:    nodeID,
-			Seq:       c.NextSeq(),
-			TS:        nowRFC3339(),
-			Payload: protocol.TaskOutputPayload{
-				TaskID: task.TaskID,
-				Stream: "stdout",
-				Offset: 0,
-				Chunk:  result.Stdout,
-			},
-		})
-	}
-	if result.Stderr != "" {
-		c.logger.Debug("sending task stderr chunk",
-			"task_id", task.TaskID,
-			"bytes", len(result.Stderr),
-		)
-		_ = c.writeJSON(conn, protocol.Envelope[protocol.TaskOutputPayload]{
-			Type:      protocol.EventTaskOutput,
-			RequestID: raw.RequestID,
-			SessionID: raw.SessionID,
-			NodeID:    nodeID,
-			Seq:       c.NextSeq(),
-			TS:        nowRFC3339(),
-			Payload: protocol.TaskOutputPayload{
-				TaskID: task.TaskID,
-				Stream: "stderr",
-				Offset: 0,
-				Chunk:  result.Stderr,
-			},
-		})
-	}
-
 	finalState := "success"
-	if result.ExitCode != 0 || result.TimedOut {
+	if result.Cancelled {
+		finalState = "cancelled"
+	} else if result.ExitCode != 0 || result.TimedOut {
 		finalState = "failed"
 	}
 
@@ -371,8 +334,9 @@ func (c *Client) handleTask(conn *websocket.Conn, nodeID string, raw protocol.Ra
 		"final_state", finalState,
 		"exit_code", result.ExitCode,
 		"timed_out", result.TimedOut,
-		"stdout_bytes", len(result.Stdout),
-		"stderr_bytes", len(result.Stderr),
+		"cancelled", result.Cancelled,
+		"stdout_bytes", stdoutBytes,
+		"stderr_bytes", stderrBytes,
 		"duration_ms", result.DurationMS,
 	)
 
@@ -390,8 +354,8 @@ func (c *Client) handleTask(conn *websocket.Conn, nodeID string, raw protocol.Ra
 			TimedOut:    result.TimedOut,
 			Truncated:   result.Truncated,
 			FinalState:  finalState,
-			StdoutBytes: int64(len(result.Stdout)),
-			StderrBytes: int64(len(result.Stderr)),
+			StdoutBytes: stdoutBytes,
+			StderrBytes: stderrBytes,
 		},
 	})
 }

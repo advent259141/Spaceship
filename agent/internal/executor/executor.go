@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -16,6 +18,7 @@ type Result struct {
 	ExitCode   int
 	PID        int
 	TimedOut   bool
+	Cancelled  bool
 	Truncated  bool
 	DurationMS int64
 }
@@ -37,7 +40,7 @@ func NewDispatcher(logger *slog.Logger, runner shell.Runner) Dispatcher {
 	}
 }
 
-func (d Dispatcher) Dispatch(task protocol.TaskSpec) (Result, error) {
+func (d Dispatcher) Dispatch(ctx context.Context, task protocol.TaskSpec) (Result, error) {
 	d.logger.Info("dispatching task",
 		"task_id", task.TaskID,
 		"task_type", task.TaskType,
@@ -54,7 +57,7 @@ func (d Dispatcher) Dispatch(task protocol.TaskSpec) (Result, error) {
 			Timeout:    time.Duration(task.TimeoutSec) * time.Second,
 			Background: boolArg(task.Args, "background"),
 		}
-		result, err := d.runner.Exec(request)
+		result, err := d.runner.Exec(ctx, request)
 		if err != nil {
 			d.logger.Error("task dispatch failed",
 				"task_id", task.TaskID,
@@ -69,6 +72,7 @@ func (d Dispatcher) Dispatch(task protocol.TaskSpec) (Result, error) {
 			ExitCode:   result.ExitCode,
 			PID:        result.PID,
 			TimedOut:   result.TimedOut,
+			Cancelled:  result.Cancelled,
 			Truncated:  false,
 			DurationMS: result.Duration.Milliseconds(),
 		}
@@ -77,6 +81,7 @@ func (d Dispatcher) Dispatch(task protocol.TaskSpec) (Result, error) {
 			"task_type", task.TaskType,
 			"exit_code", final.ExitCode,
 			"timed_out", final.TimedOut,
+			"cancelled", final.Cancelled,
 			"stdout_bytes", len(final.Stdout),
 			"stderr_bytes", len(final.Stderr),
 			"duration_ms", final.DurationMS,
@@ -158,6 +163,65 @@ func (d Dispatcher) Dispatch(task protocol.TaskSpec) (Result, error) {
 			"result_bytes", len(content),
 		)
 		return result, nil
+	case "edit_file":
+		edits, err := parseEdits(task.Args)
+		if err != nil {
+			d.logger.Error("edit_file task failed: invalid edits",
+				"task_id", task.TaskID,
+				"error", err,
+			)
+			return Result{}, err
+		}
+		request := fileops.EditRequest{
+			Path:  stringArg(task.Args, "path"),
+			Edits: edits,
+		}
+		content, err := d.fileops.EditFile(request)
+		if err != nil {
+			d.logger.Error("edit_file task failed",
+				"task_id", task.TaskID,
+				"path", request.Path,
+				"error", err,
+			)
+			return Result{}, err
+		}
+		result := Result{Stdout: content}
+		d.logger.Info("edit_file task completed",
+			"task_id", task.TaskID,
+			"path", request.Path,
+			"edits_count", len(edits),
+			"result_bytes", len(content),
+		)
+		return result, nil
+	case "grep":
+		request := fileops.GrepRequest{
+			Pattern:         stringArg(task.Args, "pattern"),
+			Path:            stringArg(task.Args, "path"),
+			IsRegex:         boolArg(task.Args, "is_regex"),
+			CaseInsensitive: boolArg(task.Args, "case_insensitive"),
+			IncludeGlobs:    stringSliceArg(task.Args, "include_globs"),
+			ExcludeGlobs:    stringSliceArg(task.Args, "exclude_globs"),
+			MaxMatches:      intArg(task.Args, "max_matches", 100),
+		}
+		content, err := d.fileops.Grep(request)
+		if err != nil {
+			d.logger.Error("grep task failed",
+				"task_id", task.TaskID,
+				"path", request.Path,
+				"pattern", request.Pattern,
+				"error", err,
+			)
+			return Result{}, err
+		}
+		result := Result{Stdout: content}
+		d.logger.Info("grep task completed",
+			"task_id", task.TaskID,
+			"path", request.Path,
+			"pattern", request.Pattern,
+			"is_regex", request.IsRegex,
+			"result_bytes", len(content),
+		)
+		return result, nil
 	default:
 		err := fmt.Errorf("unsupported task type: %s", task.TaskType)
 		d.logger.Error("task dispatch failed",
@@ -167,6 +231,76 @@ func (d Dispatcher) Dispatch(task protocol.TaskSpec) (Result, error) {
 		)
 		return Result{}, err
 	}
+}
+
+// DispatchStream dispatches tasks with streaming output support.
+// For exec tasks, output is streamed in real time via onChunk.
+// For all other task types, falls back to Dispatch and delivers the
+// complete result as a single chunk through onChunk.
+func (d Dispatcher) DispatchStream(ctx context.Context, task protocol.TaskSpec, onChunk shell.StreamCallback) (Result, error) {
+	if task.TaskType != "exec" {
+		// Non-exec tasks produce output in one shot; dispatch normally
+		// and deliver the result as bulk chunks.
+		result, err := d.Dispatch(ctx, task)
+		if err != nil {
+			return result, err
+		}
+		if onChunk != nil {
+			if result.Stdout != "" {
+				onChunk(shell.OutputChunk{Stream: "stdout", Data: result.Stdout})
+			}
+			if result.Stderr != "" {
+				onChunk(shell.OutputChunk{Stream: "stderr", Data: result.Stderr})
+			}
+		}
+		// Clear the fields since they have been forwarded via callback.
+		result.Stdout = ""
+		result.Stderr = ""
+		return result, nil
+	}
+
+	// exec task: stream shell output in real time.
+	d.logger.Info("dispatching task (streaming)",
+		"task_id", task.TaskID,
+		"task_type", task.TaskType,
+		"timeout_sec", task.TimeoutSec,
+	)
+
+	request := shell.ExecRequest{
+		Command:    stringArg(task.Args, "command"),
+		CWD:        stringArg(task.Args, "cwd"),
+		Env:        stringMapArg(task.Args, "env"),
+		Timeout:    time.Duration(task.TimeoutSec) * time.Second,
+		Background: boolArg(task.Args, "background"),
+	}
+	result, err := d.runner.ExecStream(ctx, request, onChunk)
+	if err != nil {
+		d.logger.Error("task dispatch (streaming) failed",
+			"task_id", task.TaskID,
+			"task_type", task.TaskType,
+			"error", err,
+		)
+		return Result{}, err
+	}
+	final := Result{
+		Stdout:     result.Stdout,
+		Stderr:     result.Stderr,
+		ExitCode:   result.ExitCode,
+		PID:        result.PID,
+		TimedOut:   result.TimedOut,
+		Cancelled:  result.Cancelled,
+		Truncated:  false,
+		DurationMS: result.Duration.Milliseconds(),
+	}
+	d.logger.Info("task dispatch (streaming) completed",
+		"task_id", task.TaskID,
+		"task_type", task.TaskType,
+		"exit_code", final.ExitCode,
+		"timed_out", final.TimedOut,
+		"cancelled", final.Cancelled,
+		"duration_ms", final.DurationMS,
+	)
+	return final, nil
 }
 
 func stringArg(args map[string]any, key string) string {
@@ -233,4 +367,48 @@ func stringMapArg(args map[string]any, key string) map[string]string {
 		result[mapKey] = text
 	}
 	return result
+}
+
+func stringSliceArg(args map[string]any, key string) []string {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return nil
+	}
+	rawSlice, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]string, 0, len(rawSlice))
+	for _, item := range rawSlice {
+		text, _ := item.(string)
+		if text != "" {
+			result = append(result, text)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func parseEdits(args map[string]any) ([]fileops.EditOp, error) {
+	raw, ok := args["edits"]
+	if !ok || raw == nil {
+		return nil, fmt.Errorf("edits argument is required")
+	}
+
+	// The edits arrive as []any from JSON unmarshal.
+	// Re-marshal and unmarshal to get typed structs.
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode edits: %w", err)
+	}
+	var edits []fileops.EditOp
+	if err := json.Unmarshal(encoded, &edits); err != nil {
+		return nil, fmt.Errorf("failed to parse edits: %w", err)
+	}
+	if len(edits) == 0 {
+		return nil, fmt.Errorf("edits array is empty")
+	}
+	return edits, nil
 }

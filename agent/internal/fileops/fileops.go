@@ -1,11 +1,15 @@
 package fileops
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 )
 
 type ReadRequest struct {
@@ -173,4 +177,274 @@ func (Service) Write(request WriteRequest) (string, error) {
 		return "", err
 	}
 	return string(encoded), nil
+}
+
+// EditOp represents a single search-and-replace operation.
+type EditOp struct {
+	Search  string `json:"search"`
+	Replace string `json:"replace"`
+}
+
+// EditRequest represents a request to edit a file using search-and-replace.
+type EditRequest struct {
+	Path  string
+	Edits []EditOp
+}
+
+// EditFile applies search-and-replace edits to a file.
+// Each search string must appear exactly once in the current content.
+func (Service) EditFile(request EditRequest) (string, error) {
+	if request.Path == "" {
+		return "", errors.New("path is required")
+	}
+	if len(request.Edits) == 0 {
+		return "", errors.New("at least one edit is required")
+	}
+
+	raw, err := os.ReadFile(request.Path)
+	if err != nil {
+		return "", err
+	}
+	content := string(raw)
+
+	for i, op := range request.Edits {
+		if op.Search == "" {
+			return "", fmt.Errorf("edit[%d]: search string is empty", i)
+		}
+
+		count := strings.Count(content, op.Search)
+		if count == 0 {
+			// Provide a short preview of what was searched for
+			preview := op.Search
+			if len(preview) > 80 {
+				preview = preview[:80] + "..."
+			}
+			return "", fmt.Errorf("edit[%d]: search string not found in file: %q", i, preview)
+		}
+		if count > 1 {
+			preview := op.Search
+			if len(preview) > 80 {
+				preview = preview[:80] + "..."
+			}
+			return "", fmt.Errorf("edit[%d]: search string is ambiguous (%d occurrences), provide more context: %q", i, count, preview)
+		}
+
+		content = strings.Replace(content, op.Search, op.Replace, 1)
+	}
+
+	if err := os.WriteFile(request.Path, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+
+	payload := map[string]any{
+		"path":        request.Path,
+		"edits_count": len(request.Edits),
+		"new_size":    len(content),
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// GrepRequest represents a request to search for text patterns in files.
+type GrepRequest struct {
+	Pattern       string   // search pattern (plain text or regex)
+	Path          string   // file or directory to search
+	IsRegex       bool     // treat Pattern as a regular expression
+	CaseInsensitive bool   // case-insensitive search
+	IncludeGlobs  []string // file globs to include (e.g. "*.go")
+	ExcludeGlobs  []string // file globs to exclude (e.g. "*.log")
+	MaxMatches    int      // max matches to return (0 = default 100)
+	ContextLines  int      // lines of context before/after each match
+}
+
+// GrepMatch represents a single search match.
+type GrepMatch struct {
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+	Content string `json:"content"`
+}
+
+// Grep searches for a pattern in files under the given path.
+func (Service) Grep(request GrepRequest) (string, error) {
+	if request.Pattern == "" {
+		return "", errors.New("pattern is required")
+	}
+	if request.Path == "" {
+		request.Path = "."
+	}
+	maxMatches := request.MaxMatches
+	if maxMatches <= 0 {
+		maxMatches = 100
+	}
+
+	// Compile the search pattern.
+	var re *regexp.Regexp
+	var err error
+	if request.IsRegex {
+		expr := request.Pattern
+		if request.CaseInsensitive {
+			expr = "(?i)" + expr
+		}
+		re, err = regexp.Compile(expr)
+		if err != nil {
+			return "", fmt.Errorf("invalid regex: %w", err)
+		}
+	} else {
+		escaped := regexp.QuoteMeta(request.Pattern)
+		if request.CaseInsensitive {
+			escaped = "(?i)" + escaped
+		}
+		re, err = regexp.Compile(escaped)
+		if err != nil {
+			return "", fmt.Errorf("failed to compile pattern: %w", err)
+		}
+	}
+
+	var matches []GrepMatch
+	truncated := false
+
+	info, err := os.Stat(request.Path)
+	if err != nil {
+		return "", err
+	}
+
+	if !info.IsDir() {
+		// Single file search.
+		m, err := grepFile(request.Path, re, maxMatches)
+		if err != nil {
+			return "", err
+		}
+		matches = m
+		truncated = len(matches) >= maxMatches
+	} else {
+		// Directory walk.
+		err = filepath.Walk(request.Path, func(currentPath string, fi os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return nil // skip unreadable entries
+			}
+			if fi.IsDir() {
+				name := fi.Name()
+				if len(name) > 0 && name[0] == '.' && currentPath != request.Path {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			// Apply include/exclude filters.
+			if !matchGlobs(fi.Name(), request.IncludeGlobs, true) {
+				return nil
+			}
+			if matchGlobs(fi.Name(), request.ExcludeGlobs, false) {
+				return nil
+			}
+
+			// Skip likely binary files by checking extension.
+			if isBinaryExtension(fi.Name()) {
+				return nil
+			}
+
+			remaining := maxMatches - len(matches)
+			if remaining <= 0 {
+				truncated = true
+				return errors.New("limit reached")
+			}
+
+			fileMatches, err := grepFile(currentPath, re, remaining)
+			if err != nil {
+				return nil // skip unreadable files
+			}
+			matches = append(matches, fileMatches...)
+			return nil
+		})
+		if err != nil && err.Error() != "limit reached" {
+			return "", err
+		}
+		if len(matches) >= maxMatches {
+			truncated = true
+		}
+	}
+
+	payload := map[string]any{
+		"pattern":   request.Pattern,
+		"path":      request.Path,
+		"is_regex":  request.IsRegex,
+		"matches":   matches,
+		"count":     len(matches),
+		"truncated": truncated,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// grepFile searches a single file for the regex and returns up to limit matches.
+func grepFile(path string, re *regexp.Regexp, limit int) ([]GrepMatch, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var matches []GrepMatch
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // up to 1MB per line
+	lineNum := 0
+
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+		if re.MatchString(line) {
+			matches = append(matches, GrepMatch{
+				File:    path,
+				Line:    lineNum,
+				Content: truncateLine(line, 500),
+			})
+			if len(matches) >= limit {
+				break
+			}
+		}
+	}
+	return matches, scanner.Err()
+}
+
+// truncateLine caps a line at maxLen characters to prevent oversized output.
+func truncateLine(line string, maxLen int) string {
+	if len(line) <= maxLen {
+		return line
+	}
+	return line[:maxLen] + "..."
+}
+
+// matchGlobs checks if filename matches any of the given glob patterns.
+// If patterns is empty, returns defaultMatch.
+func matchGlobs(filename string, patterns []string, defaultMatch bool) bool {
+	if len(patterns) == 0 {
+		return defaultMatch
+	}
+	for _, pattern := range patterns {
+		if matched, _ := filepath.Match(pattern, filename); matched {
+			return true
+		}
+	}
+	return false
+}
+
+// isBinaryExtension returns true for file extensions that are likely binary.
+func isBinaryExtension(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".exe", ".dll", ".so", ".dylib", ".bin",
+		".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
+		".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
+		".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac",
+		".pdf", ".doc", ".docx", ".xls", ".xlsx",
+		".wasm", ".o", ".a", ".pyc", ".class":
+		return true
+	}
+	return false
 }

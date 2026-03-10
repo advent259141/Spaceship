@@ -1,13 +1,16 @@
 package shell
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -20,13 +23,23 @@ type ExecRequest struct {
 }
 
 type ExecResult struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
-	PID      int
-	TimedOut bool
-	Duration time.Duration
+	Stdout    string
+	Stderr    string
+	ExitCode  int
+	PID       int
+	TimedOut  bool
+	Cancelled bool
+	Duration  time.Duration
 }
+
+// OutputChunk represents a streaming output fragment.
+type OutputChunk struct {
+	Stream string // "stdout" or "stderr"
+	Data   string
+}
+
+// StreamCallback is called for each output chunk during streaming execution.
+type StreamCallback func(chunk OutputChunk)
 
 type Runner struct {
 	logger *slog.Logger
@@ -39,7 +52,7 @@ func NewRunner(logger *slog.Logger) Runner {
 	return Runner{logger: logger}
 }
 
-func (r Runner) Exec(request ExecRequest) (ExecResult, error) {
+func (r Runner) Exec(ctx context.Context, request ExecRequest) (ExecResult, error) {
 	if request.Command == "" {
 		return ExecResult{}, errors.New("command is required")
 	}
@@ -62,12 +75,11 @@ func (r Runner) Exec(request ExecRequest) (ExecResult, error) {
 	)
 
 	startedAt := time.Now()
-	ctx := context.Background()
-	cancel := func() {}
 	if request.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, request.Timeout)
+		var timeoutCancel context.CancelFunc
+		ctx, timeoutCancel = context.WithTimeout(ctx, request.Timeout)
+		defer timeoutCancel()
 	}
-	defer cancel()
 
 	command := buildCommand(ctx, request.Command)
 	command.Dir = request.CWD
@@ -101,15 +113,18 @@ func (r Runner) Exec(request ExecRequest) (ExecResult, error) {
 	command.Stderr = &stderr
 
 	err := command.Run()
+	cancelled := errors.Is(ctx.Err(), context.Canceled)
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 	result := ExecResult{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		ExitCode: exitCode(err),
-		Duration: time.Since(startedAt),
-		TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded),
+		Stdout:    stdout.String(),
+		Stderr:    stderr.String(),
+		ExitCode:  exitCode(err),
+		Duration:  time.Since(startedAt),
+		TimedOut:  timedOut,
+		Cancelled: cancelled,
 	}
 
-	if err != nil && result.ExitCode == 0 && !result.TimedOut {
+	if err != nil && result.ExitCode == 0 && !timedOut && !cancelled {
 		logger.Error("shell command failed before exit status was available",
 			"cwd", workingDir,
 			"duration_ms", result.Duration.Milliseconds(),
@@ -119,18 +134,143 @@ func (r Runner) Exec(request ExecRequest) (ExecResult, error) {
 	}
 
 	level := slog.LevelInfo
-	if result.TimedOut || result.ExitCode != 0 {
+	if timedOut || cancelled || result.ExitCode != 0 {
 		level = slog.LevelWarn
 	}
 	logger.Log(context.Background(), level, "shell command completed",
 		"cwd", workingDir,
 		"exit_code", result.ExitCode,
 		"timed_out", result.TimedOut,
+		"cancelled", result.Cancelled,
 		"stdout_bytes", len(result.Stdout),
 		"stderr_bytes", len(result.Stderr),
 		"duration_ms", result.Duration.Milliseconds(),
 	)
 	return result, nil
+}
+
+// ExecStream executes a command and streams output chunks via callback in real time.
+// Unlike Exec, stdout and stderr are not buffered in memory; each line is delivered
+// immediately through onChunk. The returned ExecResult has empty Stdout/Stderr fields
+// because all output has already been streamed.
+func (r Runner) ExecStream(ctx context.Context, request ExecRequest, onChunk StreamCallback) (ExecResult, error) {
+	if request.Command == "" {
+		return ExecResult{}, errors.New("command is required")
+	}
+	if onChunk == nil {
+		return r.Exec(ctx, request)
+	}
+
+	workingDir := request.CWD
+	if workingDir == "" {
+		workingDir = "."
+	}
+	logger := r.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	logger.Info("executing shell command (streaming)",
+		"cwd", workingDir,
+		"timeout", request.Timeout.String(),
+		"env_keys", len(request.Env),
+		"command", request.Command,
+	)
+
+	startedAt := time.Now()
+	if request.Timeout > 0 {
+		var timeoutCancel context.CancelFunc
+		ctx, timeoutCancel = context.WithTimeout(ctx, request.Timeout)
+		defer timeoutCancel()
+	}
+
+	command := buildCommand(ctx, request.Command)
+	command.Dir = request.CWD
+	command.Env = mergeEnv(request.Env)
+
+	stdoutPipe, err := command.StdoutPipe()
+	if err != nil {
+		return ExecResult{}, err
+	}
+	stderrPipe, err := command.StderrPipe()
+	if err != nil {
+		return ExecResult{}, err
+	}
+
+	if err := command.Start(); err != nil {
+		logger.Error("failed to start shell command (streaming)",
+			"cwd", workingDir,
+			"error", err,
+		)
+		return ExecResult{}, err
+	}
+
+	var wg sync.WaitGroup
+	var stdoutBytes, stderrBytes int64
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		stdoutBytes = streamPipe(stdoutPipe, "stdout", onChunk)
+	}()
+	go func() {
+		defer wg.Done()
+		stderrBytes = streamPipe(stderrPipe, "stderr", onChunk)
+	}()
+
+	// Wait for all pipe readers to finish before calling Wait.
+	wg.Wait()
+
+	waitErr := command.Wait()
+	cancelled := errors.Is(ctx.Err(), context.Canceled)
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+
+	result := ExecResult{
+		Stdout:    "", // already streamed
+		Stderr:    "", // already streamed
+		ExitCode:  exitCode(waitErr),
+		Duration:  time.Since(startedAt),
+		TimedOut:  timedOut,
+		Cancelled: cancelled,
+	}
+
+	if waitErr != nil && result.ExitCode == 0 && !timedOut && !cancelled {
+		logger.Error("shell command failed before exit status was available (streaming)",
+			"cwd", workingDir,
+			"duration_ms", result.Duration.Milliseconds(),
+			"error", waitErr,
+		)
+		return result, waitErr
+	}
+
+	level := slog.LevelInfo
+	if timedOut || cancelled || result.ExitCode != 0 {
+		level = slog.LevelWarn
+	}
+	logger.Log(context.Background(), level, "shell command completed (streaming)",
+		"cwd", workingDir,
+		"exit_code", result.ExitCode,
+		"timed_out", result.TimedOut,
+		"cancelled", result.Cancelled,
+		"stdout_bytes", stdoutBytes,
+		"stderr_bytes", stderrBytes,
+		"duration_ms", result.Duration.Milliseconds(),
+	)
+	return result, nil
+}
+
+// streamPipe reads from a pipe line-by-line and sends each line as an OutputChunk.
+// Returns the total bytes read.
+func streamPipe(pipe io.ReadCloser, stream string, onChunk StreamCallback) int64 {
+	var total int64
+	scanner := bufio.NewScanner(pipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // up to 1MB per line
+	for scanner.Scan() {
+		line := scanner.Text() + "\n"
+		total += int64(len(line))
+		onChunk(OutputChunk{Stream: stream, Data: line})
+	}
+	return total
 }
 
 func buildCommand(ctx context.Context, command string) *exec.Cmd {
