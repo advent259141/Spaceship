@@ -621,6 +621,219 @@ func parseGrepResult(t *testing.T, result string) grepResultSummary {
 }
 
 // ──────────────────────────────────────
+// Delete tests
+// ──────────────────────────────────────
+
+func TestDelete_File(t *testing.T) {
+	path := writeTemp(t, "delete me")
+	svc := Service{}
+	result, err := svc.Delete(DeleteRequest{Path: path})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == "" {
+		t.Fatal("expected non-empty result")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("expected file to be deleted")
+	}
+}
+
+func TestDelete_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "empty_sub")
+	os.Mkdir(sub, 0o755)
+
+	svc := Service{}
+	_, err := svc.Delete(DeleteRequest{Path: sub})
+	if err != nil {
+		t.Fatalf("unexpected error deleting empty dir: %v", err)
+	}
+	if _, err := os.Stat(sub); !os.IsNotExist(err) {
+		t.Fatal("expected empty dir to be deleted")
+	}
+}
+
+func TestDelete_DirRecursive(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.Mkdir(sub, 0o755)
+	os.WriteFile(filepath.Join(sub, "child.txt"), []byte("x"), 0o644)
+
+	svc := Service{}
+	_, err := svc.Delete(DeleteRequest{Path: sub, Recursive: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(sub); !os.IsNotExist(err) {
+		t.Fatal("expected dir to be recursively deleted")
+	}
+}
+
+func TestDelete_NonEmptyDirWithoutRecursive(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.Mkdir(sub, 0o755)
+	os.WriteFile(filepath.Join(sub, "child.txt"), []byte("x"), 0o644)
+
+	svc := Service{}
+	_, err := svc.Delete(DeleteRequest{Path: sub, Recursive: false})
+	if err == nil {
+		t.Fatal("expected error deleting non-empty dir without recursive")
+	}
+}
+
+func TestDelete_EmptyPath(t *testing.T) {
+	svc := Service{}
+	_, err := svc.Delete(DeleteRequest{Path: ""})
+	if err == nil {
+		t.Fatal("expected error for empty path")
+	}
+}
+
+func TestDelete_NonExistent(t *testing.T) {
+	svc := Service{}
+	_, err := svc.Delete(DeleteRequest{Path: filepath.Join(t.TempDir(), "nope")})
+	if err == nil {
+		t.Fatal("expected error for non-existent path")
+	}
+}
+
+// ──────────────────────────────────────
+// Move tests
+// ──────────────────────────────────────
+
+func TestMove_BasicFile(t *testing.T) {
+	src := writeTemp(t, "move me")
+	dst := filepath.Join(t.TempDir(), "moved.txt")
+
+	svc := Service{}
+	_, err := svc.Move(MoveRequest{Src: src, Dst: dst})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatal("expected source to no longer exist")
+	}
+	assertFileContent(t, dst, "move me")
+}
+
+func TestMove_OverwriteAllowed(t *testing.T) {
+	src := writeTemp(t, "new content")
+	dst := writeTemp(t, "old content")
+
+	svc := Service{}
+	_, err := svc.Move(MoveRequest{Src: src, Dst: dst, Overwrite: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertFileContent(t, dst, "new content")
+}
+
+func TestMove_OverwriteBlocked(t *testing.T) {
+	src := writeTemp(t, "new content")
+	dst := writeTemp(t, "old content")
+
+	svc := Service{}
+	_, err := svc.Move(MoveRequest{Src: src, Dst: dst, Overwrite: false})
+	if err == nil {
+		t.Fatal("expected error when overwrite is false and dst exists")
+	}
+}
+
+func TestMove_CreatesParentDir(t *testing.T) {
+	src := writeTemp(t, "deep move")
+	dst := filepath.Join(t.TempDir(), "a", "b", "moved.txt")
+
+	svc := Service{}
+	_, err := svc.Move(MoveRequest{Src: src, Dst: dst})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertFileContent(t, dst, "deep move")
+}
+
+func TestMove_EmptySrc(t *testing.T) {
+	svc := Service{}
+	_, err := svc.Move(MoveRequest{Src: "", Dst: "x"})
+	if err == nil {
+		t.Fatal("expected error for empty src")
+	}
+}
+
+func TestMove_EmptyDst(t *testing.T) {
+	svc := Service{}
+	_, err := svc.Move(MoveRequest{Src: "x", Dst: ""})
+	if err == nil {
+		t.Fatal("expected error for empty dst")
+	}
+}
+
+// ──────────────────────────────────────
+// Copy tests
+// ──────────────────────────────────────
+
+func TestCopy_File(t *testing.T) {
+	src := writeTemp(t, "copy me")
+	dst := filepath.Join(t.TempDir(), "copied.txt")
+
+	svc := Service{}
+	_, err := svc.Copy(CopyRequest{Src: src, Dst: dst})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertFileContent(t, src, "copy me") // source unchanged
+	assertFileContent(t, dst, "copy me") // copy created
+}
+
+func TestCopy_DirectoryRecursive(t *testing.T) {
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src_dir")
+	os.Mkdir(srcDir, 0o755)
+	os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("aaa"), 0o644)
+	sub := filepath.Join(srcDir, "sub")
+	os.Mkdir(sub, 0o755)
+	os.WriteFile(filepath.Join(sub, "b.txt"), []byte("bbb"), 0o644)
+
+	dstDir := filepath.Join(dir, "dst_dir")
+
+	svc := Service{}
+	_, err := svc.Copy(CopyRequest{Src: srcDir, Dst: dstDir, Recursive: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertFileContent(t, filepath.Join(dstDir, "a.txt"), "aaa")
+	assertFileContent(t, filepath.Join(dstDir, "sub", "b.txt"), "bbb")
+}
+
+func TestCopy_OverwriteBlocked(t *testing.T) {
+	src := writeTemp(t, "new")
+	dst := writeTemp(t, "old")
+
+	svc := Service{}
+	_, err := svc.Copy(CopyRequest{Src: src, Dst: dst})
+	if err == nil {
+		t.Fatal("expected error when dst exists and overwrite not allowed")
+	}
+}
+
+func TestCopy_EmptySrc(t *testing.T) {
+	svc := Service{}
+	_, err := svc.Copy(CopyRequest{Src: "", Dst: "x"})
+	if err == nil {
+		t.Fatal("expected error for empty src")
+	}
+}
+
+func TestCopy_NonExistentSrc(t *testing.T) {
+	svc := Service{}
+	_, err := svc.Copy(CopyRequest{Src: filepath.Join(t.TempDir(), "nope"), Dst: "x"})
+	if err == nil {
+		t.Fatal("expected error for non-existent src")
+	}
+}
+
+// ──────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────
 

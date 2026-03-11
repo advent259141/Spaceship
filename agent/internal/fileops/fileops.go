@@ -466,15 +466,17 @@ func (Service) Delete(request DeleteRequest) (string, error) {
 		return "", err
 	}
 
-	if info.IsDir() {
-		if !request.Recursive {
-			return "", fmt.Errorf("path is a directory; set recursive=true to delete recursively")
-		}
+	if info.IsDir() && request.Recursive {
+		// Recursive delete for directories
 		if err := os.RemoveAll(request.Path); err != nil {
 			return "", err
 		}
 	} else {
+		// os.Remove works for files and empty directories
 		if err := os.Remove(request.Path); err != nil {
+			if info.IsDir() {
+				return "", fmt.Errorf("directory is not empty; set recursive=true to delete recursively")
+			}
 			return "", err
 		}
 	}
@@ -555,6 +557,11 @@ func (s Service) Copy(request CopyRequest) (string, error) {
 	info, err := os.Stat(request.Src)
 	if err != nil {
 		return "", err
+	}
+
+	// Check if destination already exists
+	if _, err := os.Stat(request.Dst); err == nil {
+		return "", fmt.Errorf("destination %q already exists", request.Dst)
 	}
 
 	if info.IsDir() {
