@@ -448,3 +448,186 @@ func isBinaryExtension(name string) bool {
 	}
 	return false
 }
+
+// DeleteRequest represents a request to delete a file or directory.
+type DeleteRequest struct {
+	Path      string
+	Recursive bool
+}
+
+// Delete removes a file or directory from the filesystem.
+func (Service) Delete(request DeleteRequest) (string, error) {
+	if request.Path == "" {
+		return "", errors.New("path is required")
+	}
+
+	info, err := os.Stat(request.Path)
+	if err != nil {
+		return "", err
+	}
+
+	if info.IsDir() {
+		if !request.Recursive {
+			return "", fmt.Errorf("path is a directory; set recursive=true to delete recursively")
+		}
+		if err := os.RemoveAll(request.Path); err != nil {
+			return "", err
+		}
+	} else {
+		if err := os.Remove(request.Path); err != nil {
+			return "", err
+		}
+	}
+
+	payload := map[string]any{
+		"path":    request.Path,
+		"is_dir":  info.IsDir(),
+		"deleted": true,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// MoveRequest represents a request to move/rename a file or directory.
+type MoveRequest struct {
+	Src       string
+	Dst       string
+	Overwrite bool
+}
+
+// Move moves or renames a file or directory.
+func (Service) Move(request MoveRequest) (string, error) {
+	if request.Src == "" {
+		return "", errors.New("src is required")
+	}
+	if request.Dst == "" {
+		return "", errors.New("dst is required")
+	}
+
+	if !request.Overwrite {
+		if _, err := os.Stat(request.Dst); err == nil {
+			return "", fmt.Errorf("destination already exists: %s", request.Dst)
+		}
+	}
+
+	// Ensure parent directory exists.
+	parent := filepath.Dir(request.Dst)
+	if parent != "" && parent != "." {
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return "", err
+		}
+	}
+
+	if err := os.Rename(request.Src, request.Dst); err != nil {
+		return "", err
+	}
+
+	payload := map[string]any{
+		"src": request.Src,
+		"dst": request.Dst,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// CopyRequest represents a request to copy a file or directory.
+type CopyRequest struct {
+	Src       string
+	Dst       string
+	Recursive bool
+}
+
+// Copy copies a file or directory.
+func (s Service) Copy(request CopyRequest) (string, error) {
+	if request.Src == "" {
+		return "", errors.New("src is required")
+	}
+	if request.Dst == "" {
+		return "", errors.New("dst is required")
+	}
+
+	info, err := os.Stat(request.Src)
+	if err != nil {
+		return "", err
+	}
+
+	if info.IsDir() {
+		if !request.Recursive {
+			return "", fmt.Errorf("source is a directory; set recursive=true to copy recursively")
+		}
+		if err := copyDir(request.Src, request.Dst); err != nil {
+			return "", err
+		}
+	} else {
+		if err := copyFile(request.Src, request.Dst); err != nil {
+			return "", err
+		}
+	}
+
+	payload := map[string]any{
+		"src":   request.Src,
+		"dst":   request.Dst,
+		"is_dir": info.IsDir(),
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func copyFile(src, dst string) error {
+	parent := filepath.Dir(dst)
+	if parent != "" && parent != "." {
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return err
+		}
+	}
+
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, srcInfo.Mode())
+}
+
+func copyDir(src, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, srcInfo.Mode()); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+		if entry.IsDir() {
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			if err := copyFile(srcPath, dstPath); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

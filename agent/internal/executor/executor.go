@@ -222,6 +222,74 @@ func (d Dispatcher) Dispatch(ctx context.Context, task protocol.TaskSpec) (Resul
 			"result_bytes", len(content),
 		)
 		return result, nil
+	case "delete_file":
+		request := fileops.DeleteRequest{
+			Path:      stringArg(task.Args, "path"),
+			Recursive: boolArg(task.Args, "recursive"),
+		}
+		content, err := d.fileops.Delete(request)
+		if err != nil {
+			d.logger.Error("delete_file task failed",
+				"task_id", task.TaskID,
+				"path", request.Path,
+				"error", err,
+			)
+			return Result{}, err
+		}
+		result := Result{Stdout: content}
+		d.logger.Info("delete_file task completed",
+			"task_id", task.TaskID,
+			"path", request.Path,
+			"recursive", request.Recursive,
+		)
+		return result, nil
+	case "move_file":
+		request := fileops.MoveRequest{
+			Src:       stringArg(task.Args, "src"),
+			Dst:       stringArg(task.Args, "dst"),
+			Overwrite: boolArg(task.Args, "overwrite"),
+		}
+		content, err := d.fileops.Move(request)
+		if err != nil {
+			d.logger.Error("move_file task failed",
+				"task_id", task.TaskID,
+				"src", request.Src,
+				"dst", request.Dst,
+				"error", err,
+			)
+			return Result{}, err
+		}
+		result := Result{Stdout: content}
+		d.logger.Info("move_file task completed",
+			"task_id", task.TaskID,
+			"src", request.Src,
+			"dst", request.Dst,
+		)
+		return result, nil
+	case "copy_file":
+		request := fileops.CopyRequest{
+			Src:       stringArg(task.Args, "src"),
+			Dst:       stringArg(task.Args, "dst"),
+			Recursive: boolArg(task.Args, "recursive"),
+		}
+		content, err := d.fileops.Copy(request)
+		if err != nil {
+			d.logger.Error("copy_file task failed",
+				"task_id", task.TaskID,
+				"src", request.Src,
+				"dst", request.Dst,
+				"error", err,
+			)
+			return Result{}, err
+		}
+		result := Result{Stdout: content}
+		d.logger.Info("copy_file task completed",
+			"task_id", task.TaskID,
+			"src", request.Src,
+			"dst", request.Dst,
+			"recursive", request.Recursive,
+		)
+		return result, nil
 	default:
 		err := fmt.Errorf("unsupported task type: %s", task.TaskType)
 		d.logger.Error("task dispatch failed",
