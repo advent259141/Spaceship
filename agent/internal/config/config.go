@@ -25,6 +25,8 @@ type Config struct {
 	ReconnectMaxDelay time.Duration
 	Platform          string
 	Arch              string
+	PythonPath        string // Override auto-detected Python binary path
+	SkipPythonVenv    bool   // If true, use system Python directly without creating a venv
 }
 
 func LoadFromEnv() (Config, error) {
@@ -41,6 +43,8 @@ func LoadFromEnv() (Config, error) {
 		ReconnectMaxDelay: defaultReconnectMaxDelay,
 		Platform:          runtime.GOOS,
 		Arch:              runtime.GOARCH,
+		PythonPath:        strings.TrimSpace(os.Getenv("SPACESHIP_PYTHON_PATH")),
+		SkipPythonVenv:    strings.EqualFold(strings.TrimSpace(os.Getenv("SPACESHIP_SKIP_PYTHON_VENV")), "true"),
 	}
 
 	if value := strings.TrimSpace(os.Getenv("SPACESHIP_HEARTBEAT_INTERVAL")); value != "" {

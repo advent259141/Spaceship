@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"spaceship/agent/internal/fileops"
@@ -24,19 +25,21 @@ type Result struct {
 }
 
 type Dispatcher struct {
-	logger  *slog.Logger
-	runner  shell.Runner
-	fileops fileops.Service
+	logger     *slog.Logger
+	runner     shell.Runner
+	fileops    fileops.Service
+	pythonPath string // resolved Python binary path (empty = not available)
 }
 
-func NewDispatcher(logger *slog.Logger, runner shell.Runner) Dispatcher {
+func NewDispatcher(logger *slog.Logger, runner shell.Runner, pythonPath string) Dispatcher {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return Dispatcher{
-		logger:  logger,
-		runner:  runner,
-		fileops: fileops.Service{},
+		logger:     logger,
+		runner:     runner,
+		fileops:    fileops.Service{},
+		pythonPath: pythonPath,
 	}
 }
 
@@ -290,6 +293,81 @@ func (d Dispatcher) Dispatch(ctx context.Context, task protocol.TaskSpec) (Resul
 			"recursive", request.Recursive,
 		)
 		return result, nil
+	case "exec_python":
+		if d.pythonPath == "" {
+			err := fmt.Errorf("python is not available on this node")
+			d.logger.Error("exec_python task failed",
+				"task_id", task.TaskID,
+				"error", err,
+			)
+			return Result{}, err
+		}
+
+		code := stringArg(task.Args, "code")
+		if code == "" {
+			err := fmt.Errorf("code argument is required")
+			d.logger.Error("exec_python task failed",
+				"task_id", task.TaskID,
+				"error", err,
+			)
+			return Result{}, err
+		}
+
+		// Write code to a temp file
+		tmpFile, err := os.CreateTemp("", "spaceship_py_*.py")
+		if err != nil {
+			d.logger.Error("exec_python task failed: cannot create temp file",
+				"task_id", task.TaskID,
+				"error", err,
+			)
+			return Result{}, err
+		}
+		tmpPath := tmpFile.Name()
+		defer os.Remove(tmpPath)
+
+		if _, err := tmpFile.WriteString(code); err != nil {
+			tmpFile.Close()
+			d.logger.Error("exec_python task failed: cannot write temp file",
+				"task_id", task.TaskID,
+				"error", err,
+			)
+			return Result{}, err
+		}
+		tmpFile.Close()
+
+		// Execute via shell runner
+		command := fmt.Sprintf("%s %s", d.pythonPath, tmpPath)
+		cwd := stringArg(task.Args, "cwd")
+		execReq := shell.ExecRequest{
+			Command: command,
+			CWD:     cwd,
+			Timeout: time.Duration(task.TimeoutSec) * time.Second,
+		}
+		execResult, execErr := d.runner.Exec(ctx, execReq)
+		if execErr != nil {
+			d.logger.Error("exec_python task failed",
+				"task_id", task.TaskID,
+				"error", execErr,
+			)
+			return Result{}, execErr
+		}
+		final := Result{
+			Stdout:     execResult.Stdout,
+			Stderr:     execResult.Stderr,
+			ExitCode:   execResult.ExitCode,
+			PID:        execResult.PID,
+			TimedOut:   execResult.TimedOut,
+			Cancelled:  execResult.Cancelled,
+			Truncated:  false,
+			DurationMS: execResult.Duration.Milliseconds(),
+		}
+		d.logger.Info("exec_python task completed",
+			"task_id", task.TaskID,
+			"exit_code", final.ExitCode,
+			"timed_out", final.TimedOut,
+			"duration_ms", final.DurationMS,
+		)
+		return final, nil
 	default:
 		err := fmt.Errorf("unsupported task type: %s", task.TaskType)
 		d.logger.Error("task dispatch failed",

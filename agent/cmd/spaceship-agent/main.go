@@ -9,6 +9,7 @@ import (
 
 	"spaceship/agent/internal/config"
 	agentlogger "spaceship/agent/internal/logger"
+	"spaceship/agent/internal/python"
 	"spaceship/agent/internal/wsclient"
 )
 
@@ -20,7 +21,26 @@ func main() {
 	}
 
 	logger := agentlogger.New(cfg.LogLevel)
-	client := wsclient.New(cfg.ServerURL, logger)
+
+	// Setup Python environment (detect system Python, create/reuse venv)
+	pyEnv := python.Setup(python.Options{
+		PythonPath: cfg.PythonPath,
+		SkipVenv:   cfg.SkipPythonVenv,
+		Logger:     logger,
+	})
+	pythonPath := ""
+	if pyEnv.Available {
+		pythonPath = pyEnv.PythonPath
+		logger.Info("python environment ready",
+			"python", pyEnv.PythonPath,
+			"version", pyEnv.Version,
+			"is_venv", pyEnv.IsVenv,
+		)
+	} else {
+		logger.Info("python not available, exec_python capability disabled")
+	}
+
+	client := wsclient.New(cfg.ServerURL, logger, pythonPath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -32,6 +52,7 @@ func main() {
 		"heartbeat_interval", cfg.HeartbeatInterval.String(),
 		"reconnect_min_delay", cfg.ReconnectMinDelay.String(),
 		"reconnect_max_delay", cfg.ReconnectMaxDelay.String(),
+		"python_available", pyEnv.Available,
 	)
 
 	if err := client.Run(ctx, cfg); err != nil {

@@ -47,7 +47,9 @@ Go agent 当前负责：
 - 接收 `node.welcome`
 - 定时发送 `node.heartbeat`
 - 接收 `task.dispatch`
-- 执行 `exec`、`list_dir`、`read_file`、`write_file`
+- 执行 `exec`、`list_dir`、`read_file`、`write_file`、`edit_file`、`grep`
+- 执行 `delete_file`、`move_file`、`copy_file`
+- 检测系统 Python 并自动创建/复用 venv，支持 `exec_python`
 - 回传 `task.accepted`、`task.started`、`task.output`、`task.result`
 - 在连接断开时自动退避重连
 
@@ -75,6 +77,7 @@ Go agent 当前负责：
 │     ├─ metadata/
 │     ├─ policy/
 │     ├─ protocol/
+│     ├─ python/
 │     ├─ registrar/
 │     ├─ shell/
 │     └─ wsclient/
@@ -106,6 +109,12 @@ Go agent 当前负责：
 - `listdir`：查看指定节点上的目录内容
 - `readfile`：读取指定节点上的文本文件内容
 - `writefile`：向指定节点上的文件写入文本内容，支持覆盖或追加
+- `editfile`：通过搜索替换编辑指定节点上的文件
+- `grepfile`：在指定节点上搜索文件内容
+- `deletefile`：删除指定节点上的文件或目录
+- `movefile`：移动或重命名指定节点上的文件或目录
+- `copyfile`：复制指定节点上的文件或目录
+- `executepython`：在指定节点上执行 Python 代码（需节点安装 Python）
 
 ## Go agent 配置
 
@@ -120,6 +129,10 @@ SPACESHIP_LOG_LEVEL=info
 SPACESHIP_HEARTBEAT_INTERVAL=20s
 SPACESHIP_RECONNECT_MIN_DELAY=1s
 SPACESHIP_RECONNECT_MAX_DELAY=30s
+
+# Python 配置（可选）
+# SPACESHIP_PYTHON_PATH=
+# SPACESHIP_SKIP_PYTHON_VENV=false
 ```
 
 关键项说明：
@@ -130,6 +143,8 @@ SPACESHIP_RECONNECT_MAX_DELAY=30s
 - `SPACESHIP_HEARTBEAT_INTERVAL`：心跳间隔
 - `SPACESHIP_RECONNECT_MIN_DELAY`：最小重连等待时间
 - `SPACESHIP_RECONNECT_MAX_DELAY`：最大重连等待时间
+- `SPACESHIP_PYTHON_PATH`：手动指定 Python 解释器路径（留空则自动检测）
+- `SPACESHIP_SKIP_PYTHON_VENV`：设为 `true` 跳过 venv 创建，直接使用系统 Python
 
 ## 运行方式
 

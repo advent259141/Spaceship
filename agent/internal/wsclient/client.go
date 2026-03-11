@@ -17,8 +17,9 @@ import (
 )
 
 type Client struct {
-	serverURL string
-	logger    *slog.Logger
+	serverURL  string
+	logger     *slog.Logger
+	pythonPath string // resolved Python binary path (empty = not available)
 
 	mu      sync.Mutex
 	writeMu sync.Mutex
@@ -26,8 +27,8 @@ type Client struct {
 	cancels sync.Map // map[taskID string] -> context.CancelFunc
 }
 
-func New(serverURL string, logger *slog.Logger) *Client {
-	return &Client{serverURL: serverURL, logger: logger}
+func New(serverURL string, logger *slog.Logger, pythonPath string) *Client {
+	return &Client{serverURL: serverURL, logger: logger, pythonPath: pythonPath}
 }
 
 func (c *Client) Run(ctx context.Context, cfg config.Config) error {
@@ -104,7 +105,7 @@ func (c *Client) runSession(ctx context.Context, cfg config.Config) error {
 		"resume_support", welcome.ResumeSupport,
 	)
 
-	execDispatcher := executor.NewDispatcher(c.logger, shell.NewRunner(c.logger))
+	execDispatcher := executor.NewDispatcher(c.logger, shell.NewRunner(c.logger), c.pythonPath)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- c.readLoop(ctx, conn, cfg, execDispatcher)

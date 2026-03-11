@@ -14,7 +14,7 @@ import (
 
 // sendHello builds and sends the node.hello envelope to the server.
 func (c *Client) sendHello(conn *websocket.Conn, cfg config.Config) error {
-	payload := buildHelloPayload(cfg)
+	payload := buildHelloPayload(cfg, c.pythonPath)
 	c.logger.Debug("building node.hello payload",
 		"node_id", cfg.NodeID,
 		"hostname", payload.Hostname,
@@ -56,16 +56,25 @@ func (c *Client) readWelcome(conn *websocket.Conn) (protocol.WelcomePayload, err
 }
 
 // buildHelloPayload constructs the hello payload from config and system metadata.
-func buildHelloPayload(cfg config.Config) protocol.HelloPayload {
+func buildHelloPayload(cfg config.Config, pythonPath string) protocol.HelloPayload {
 	hostname, _ := os.Hostname()
+
+	capabilities := []string{
+		"exec", "list_dir", "read_file", "write_file",
+		"edit_file", "grep", "delete_file", "move_file", "copy_file",
+	}
+	if pythonPath != "" {
+		capabilities = append(capabilities, "exec_python")
+	}
+
 	return protocol.HelloPayload{
 		Token:                cfg.Token,
 		Hostname:             hostname,
 		Alias:                cfg.Alias,
 		Platform:             cfg.Platform,
 		Arch:                 cfg.Arch,
-		AgentVersion:         "0.1.0",
-		DeclaredCapabilities: []string{"exec", "list_dir", "read_file", "write_file", "edit_file", "grep"},
+		AgentVersion:         "0.2.0",
+		DeclaredCapabilities: capabilities,
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 
 func newTestDispatcher() Dispatcher {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	return NewDispatcher(logger, shell.NewRunner(logger))
+	return NewDispatcher(logger, shell.NewRunner(logger), "")
 }
 
 // ──────────────────────────────────────
