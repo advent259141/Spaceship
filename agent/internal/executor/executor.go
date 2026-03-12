@@ -26,21 +26,23 @@ type Result struct {
 }
 
 type Dispatcher struct {
-	logger     *slog.Logger
-	runner     shell.Runner
-	fileops    fileops.Service
-	pythonPath string // resolved Python binary path (empty = not available)
+	logger        *slog.Logger
+	runner        shell.Runner
+	fileops       fileops.Service
+	pythonPath    string // resolved Python binary path (empty = not available)
+	serverBaseURL string // HTTP base URL derived from WS server address
 }
 
-func NewDispatcher(logger *slog.Logger, runner shell.Runner, pythonPath string) Dispatcher {
+func NewDispatcher(logger *slog.Logger, runner shell.Runner, pythonPath string, serverBaseURL string) Dispatcher {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return Dispatcher{
-		logger:     logger,
-		runner:     runner,
-		fileops:    fileops.Service{},
-		pythonPath: pythonPath,
+		logger:        logger,
+		runner:        runner,
+		fileops:       fileops.Service{},
+		pythonPath:    pythonPath,
+		serverBaseURL: serverBaseURL,
 	}
 }
 
@@ -371,11 +373,12 @@ func (d Dispatcher) Dispatch(ctx context.Context, task protocol.TaskSpec) (Resul
 		return final, nil
 	case "fetch_file":
 		// Download a file from AstrBot via HTTP GET.
-		downloadURL := stringArg(task.Args, "download_url")
+		token := stringArg(task.Args, "token")
 		savePath := stringArg(task.Args, "save_path")
-		if downloadURL == "" || savePath == "" {
-			return Result{}, fmt.Errorf("fetch_file requires download_url and save_path")
+		if token == "" || savePath == "" {
+			return Result{}, fmt.Errorf("fetch_file requires token and save_path")
 		}
+		downloadURL := d.serverBaseURL + "/api/spaceship/files/" + token
 		startedAt := time.Now()
 		if err := filetransfer.Download(ctx, d.logger, downloadURL, savePath); err != nil {
 			d.logger.Error("fetch_file task failed",
@@ -399,12 +402,12 @@ func (d Dispatcher) Dispatch(ctx context.Context, task protocol.TaskSpec) (Resul
 		}, nil
 	case "push_file":
 		// Upload a local file to AstrBot via HTTP POST multipart.
-		uploadURL := stringArg(task.Args, "upload_url")
-		filePath := stringArg(task.Args, "file_path")
 		token := stringArg(task.Args, "token")
-		if uploadURL == "" || filePath == "" || token == "" {
-			return Result{}, fmt.Errorf("push_file requires upload_url, file_path and token")
+		filePath := stringArg(task.Args, "file_path")
+		if token == "" || filePath == "" {
+			return Result{}, fmt.Errorf("push_file requires token and file_path")
 		}
+		uploadURL := d.serverBaseURL + "/api/spaceship/files/upload"
 		startedAt := time.Now()
 		if err := filetransfer.Upload(ctx, d.logger, uploadURL, filePath, token); err != nil {
 			d.logger.Error("push_file task failed",

@@ -105,7 +105,7 @@ func (c *Client) runSession(ctx context.Context, cfg config.Config) error {
 		"resume_support", welcome.ResumeSupport,
 	)
 
-	execDispatcher := executor.NewDispatcher(c.logger, shell.NewRunner(c.logger), c.pythonPath)
+	execDispatcher := executor.NewDispatcher(c.logger, shell.NewRunner(c.logger), c.pythonPath, wsURLToHTTPBase(c.serverURL))
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- c.readLoop(ctx, conn, cfg, execDispatcher)
@@ -434,4 +434,28 @@ func backoffDelay(attempt int, minDelay time.Duration, maxDelay time.Duration) t
 		return maxDelay
 	}
 	return delay
+}
+
+// wsURLToHTTPBase extracts the HTTP base URL from a WebSocket URL.
+// Example: "ws://192.168.1.5:6185/api/spaceship/ws" → "http://192.168.1.5:6185"
+func wsURLToHTTPBase(wsURL string) string {
+	u := wsURL
+	// Replace scheme.
+	switch {
+	case len(u) > 6 && u[:6] == "wss://":
+		u = "https://" + u[6:]
+	case len(u) > 5 && u[:5] == "ws://":
+		u = "http://" + u[5:]
+	}
+	// Strip path: find the third '/' (after "http://").
+	slashCount := 0
+	for i, ch := range u {
+		if ch == '/' {
+			slashCount++
+			if slashCount == 3 {
+				return u[:i]
+			}
+		}
+	}
+	return u
 }
