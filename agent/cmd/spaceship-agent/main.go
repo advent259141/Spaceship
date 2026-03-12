@@ -14,13 +14,15 @@ import (
 )
 
 func main() {
-	cfg, err := config.LoadFromEnv()
+	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("load config failed", "error", err)
 		os.Exit(1)
 	}
 
 	logger := agentlogger.New(cfg.LogLevel)
+
+	logger.Info("configuration loaded", "source", cfg.ConfigSource)
 
 	// Setup Python environment (detect system Python, create/reuse venv)
 	pyEnv := python.Setup(python.Options{
@@ -49,6 +51,7 @@ func main() {
 		"node_id", cfg.NodeID,
 		"alias", cfg.Alias,
 		"server_url", cfg.ServerURL,
+		"config_source", cfg.ConfigSource,
 		"heartbeat_interval", cfg.HeartbeatInterval.String(),
 		"reconnect_min_delay", cfg.ReconnectMinDelay.String(),
 		"reconnect_max_delay", cfg.ReconnectMaxDelay.String(),

@@ -1,0 +1,33 @@
+# Spaceship Agent 配置文件
+# 将此文件复制为 spaceship.yaml 即可使用。
+# 配置加载优先级：CLI flags > 环境变量 > 此文件 > 内置默认值
+
+# [必填] AstrBot WebSocket 网关地址
+server_url: ws://127.0.0.1:6185/api/spaceship/ws
+
+# [必填] 节点唯一标识
+node_id: dev-node-01
+
+# [必填] 认证 token，须与 AstrBot 中的 bootstrap_token 一致
+token: change-me
+
+# [可选] 节点显示名称（默认等于 node_id）
+alias: Local Dev Node
+
+# [可选] 日志级别: debug, info, warn, error
+log_level: info
+
+# [可选] 心跳间隔（Go duration 格式）
+heartbeat_interval: 20s
+
+# [可选] 重连策略
+reconnect:
+  min_delay: 1s
+  max_delay: 30s
+
+# [可选] Python 配置
+python:
+  # 手动指定 Python 解释器路径（留空则自动检测）
+  path: ""
+  # 设为 true 跳过 venv 创建，直接使用系统 Python
+  skip_venv: false

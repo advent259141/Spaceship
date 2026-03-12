@@ -118,7 +118,58 @@ Go agent 当前负责：
 
 ## Go agent 配置
 
-agent 目录下提供了 `.env` 文件，可直接修改：
+agent 支持三种配置方式，加载优先级为：
+
+**CLI flags > 环境变量 > YAML 配置文件 > 内置默认值**
+
+### 方式一：YAML 配置文件（推荐）
+
+将 `spaceship.yaml.example` 复制为 `spaceship.yaml`：
+
+```yaml
+server_url: ws://127.0.0.1:6185/api/spaceship/ws
+node_id: dev-node-01
+token: change-me
+alias: Local Dev Node
+
+log_level: info
+heartbeat_interval: 20s
+
+reconnect:
+  min_delay: 1s
+  max_delay: 30s
+
+python:
+  path: ""           # 留空则自动检测
+  skip_venv: false
+```
+
+agent 自动按以下顺序搜索配置文件：
+1. `--config` 命令行参数指定的路径
+2. `SPACESHIP_CONFIG_FILE` 环境变量
+3. 工作目录下的 `spaceship.yaml` / `spaceship.yml`
+4. 可执行文件同目录下的 `spaceship.yaml` / `spaceship.yml`
+
+### 方式二：CLI Flags
+
+```powershell
+spaceship-agent.exe --server ws://192.168.1.100:6185/api/spaceship/ws --node-id my-node --token secret
+```
+
+可用 flags：
+
+| Flag | 说明 |
+|------|------|
+| `--config` | 指定 YAML 配置文件路径 |
+| `--server` | AstrBot WebSocket 网关地址 |
+| `--node-id` | 节点唯一 ID |
+| `--token` | 认证 token |
+| `--alias` | 节点显示名称 |
+| `--log-level` | 日志级别 (debug/info/warn/error) |
+
+### 方式三：环境变量 / .env 文件
+
+agent 目录下的 `.env` 文件仍然支持（向后兼容）：
 
 ```env
 SPACESHIP_SERVER_URL=ws://127.0.0.1:6185/api/spaceship/ws
@@ -134,17 +185,6 @@ SPACESHIP_RECONNECT_MAX_DELAY=30s
 # SPACESHIP_PYTHON_PATH=
 # SPACESHIP_SKIP_PYTHON_VENV=false
 ```
-
-关键项说明：
-
-- `SPACESHIP_SERVER_URL`：AstrBot 的 WebSocket 网关地址
-- `SPACESHIP_NODE_ID`：节点唯一 ID
-- `SPACESHIP_NODE_TOKEN`：需要与 AstrBot 中的 `bootstrap_token` 一致
-- `SPACESHIP_HEARTBEAT_INTERVAL`：心跳间隔
-- `SPACESHIP_RECONNECT_MIN_DELAY`：最小重连等待时间
-- `SPACESHIP_RECONNECT_MAX_DELAY`：最大重连等待时间
-- `SPACESHIP_PYTHON_PATH`：手动指定 Python 解释器路径（留空则自动检测）
-- `SPACESHIP_SKIP_PYTHON_VENV`：设为 `true` 跳过 venv 创建，直接使用系统 Python
 
 ## 运行方式
 
