@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"spaceship/agent/internal/fileops"
+	"spaceship/agent/internal/filetransfer"
 	"spaceship/agent/internal/protocol"
 	"spaceship/agent/internal/shell"
 )
@@ -368,6 +369,63 @@ func (d Dispatcher) Dispatch(ctx context.Context, task protocol.TaskSpec) (Resul
 			"duration_ms", final.DurationMS,
 		)
 		return final, nil
+	case "fetch_file":
+		// Download a file from AstrBot via HTTP GET.
+		downloadURL := stringArg(task.Args, "download_url")
+		savePath := stringArg(task.Args, "save_path")
+		if downloadURL == "" || savePath == "" {
+			return Result{}, fmt.Errorf("fetch_file requires download_url and save_path")
+		}
+		startedAt := time.Now()
+		if err := filetransfer.Download(ctx, d.logger, downloadURL, savePath); err != nil {
+			d.logger.Error("fetch_file task failed",
+				"task_id", task.TaskID,
+				"error", err,
+			)
+			return Result{
+				Stderr:     err.Error(),
+				ExitCode:   1,
+				DurationMS: time.Since(startedAt).Milliseconds(),
+			}, nil
+		}
+		d.logger.Info("fetch_file task completed",
+			"task_id", task.TaskID,
+			"save_path", savePath,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		)
+		return Result{
+			Stdout:     fmt.Sprintf("file saved to %s", savePath),
+			DurationMS: time.Since(startedAt).Milliseconds(),
+		}, nil
+	case "push_file":
+		// Upload a local file to AstrBot via HTTP POST multipart.
+		uploadURL := stringArg(task.Args, "upload_url")
+		filePath := stringArg(task.Args, "file_path")
+		token := stringArg(task.Args, "token")
+		if uploadURL == "" || filePath == "" || token == "" {
+			return Result{}, fmt.Errorf("push_file requires upload_url, file_path and token")
+		}
+		startedAt := time.Now()
+		if err := filetransfer.Upload(ctx, d.logger, uploadURL, filePath, token); err != nil {
+			d.logger.Error("push_file task failed",
+				"task_id", task.TaskID,
+				"error", err,
+			)
+			return Result{
+				Stderr:     err.Error(),
+				ExitCode:   1,
+				DurationMS: time.Since(startedAt).Milliseconds(),
+			}, nil
+		}
+		d.logger.Info("push_file task completed",
+			"task_id", task.TaskID,
+			"file_path", filePath,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		)
+		return Result{
+			Stdout:     fmt.Sprintf("file %s uploaded", filePath),
+			DurationMS: time.Since(startedAt).Milliseconds(),
+		}, nil
 	default:
 		err := fmt.Errorf("unsupported task type: %s", task.TaskType)
 		d.logger.Error("task dispatch failed",
