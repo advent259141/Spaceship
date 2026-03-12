@@ -115,6 +115,12 @@ func (r Runner) Exec(ctx context.Context, request ExecRequest) (ExecResult, erro
 	err := command.Run()
 	cancelled := errors.Is(ctx.Err(), context.Canceled)
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+
+	// If the context expired, kill the entire process tree.
+	if timedOut || cancelled {
+		killProcessTree(command, logger)
+	}
+
 	result := ExecResult{
 		Stdout:    stdout.String(),
 		Stderr:    stderr.String(),
@@ -205,6 +211,19 @@ func (r Runner) ExecStream(ctx context.Context, request ExecRequest, onChunk Str
 		return ExecResult{}, err
 	}
 
+	// Monitor context: kill the entire process tree when context expires.
+	// This ensures child processes (e.g. sleep) are killed and pipe readers
+	// unblock promptly instead of waiting for children to exit naturally.
+	processDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			killProcessTree(command, logger)
+		case <-processDone:
+			// Process exited normally; nothing to kill.
+		}
+	}()
+
 	var wg sync.WaitGroup
 	var stdoutBytes, stderrBytes int64
 
@@ -222,6 +241,10 @@ func (r Runner) ExecStream(ctx context.Context, request ExecRequest, onChunk Str
 	wg.Wait()
 
 	waitErr := command.Wait()
+
+	// Signal the kill goroutine that the process has exited.
+	close(processDone)
+
 	cancelled := errors.Is(ctx.Err(), context.Canceled)
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 
@@ -274,10 +297,18 @@ func streamPipe(pipe io.ReadCloser, stream string, onChunk StreamCallback) int64
 }
 
 func buildCommand(ctx context.Context, command string) *exec.Cmd {
+	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		return exec.CommandContext(ctx, "cmd", "/C", command)
+		cmd = exec.CommandContext(ctx, "cmd", "/C", command)
+	} else {
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-lc", command)
 	}
-	return exec.CommandContext(ctx, "/bin/sh", "-lc", command)
+	// Disable CommandContext's default kill behavior.
+	// We handle killing the entire process tree ourselves via killProcessTree.
+	cmd.Cancel = func() error { return nil }
+	// Set platform-specific process attributes for process group management.
+	setProcAttr(cmd)
+	return cmd
 }
 
 func mergeEnv(customEnv map[string]string) []string {
