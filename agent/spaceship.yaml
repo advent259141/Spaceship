@@ -5,14 +5,8 @@
 # [必填] AstrBot WebSocket 网关地址
 server_url: ws://127.0.0.1:6185/api/spaceship/ws
 
-# [必填] 节点唯一标识
-node_id: dev-node-01
-
 # [必填] 认证 token，须与 AstrBot 中的 bootstrap_token 一致
 token: change-me
-
-# [可选] 节点显示名称（默认等于 node_id）
-alias: Local Dev Node
 
 # [可选] 日志级别: debug, info, warn, error
 log_level: info
@@ -31,3 +25,6 @@ python:
   path: ""
   # 设为 true 跳过 venv 创建，直接使用系统 Python
   skip_venv: false
+
+# 注意：node_id 由系统根据机器标识自动生成，无需手动配置。
+# 节点别名 (alias) 可在 AstrBot WebUI 中设置。

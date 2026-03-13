@@ -49,7 +49,6 @@ func main() {
 
 	logger.Info("spaceship agent initialized",
 		"node_id", cfg.NodeID,
-		"alias", cfg.Alias,
 		"server_url", cfg.ServerURL,
 		"config_source", cfg.ConfigSource,
 		"heartbeat_interval", cfg.HeartbeatInterval.String(),

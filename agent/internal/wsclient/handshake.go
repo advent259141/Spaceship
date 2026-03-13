@@ -62,7 +62,7 @@ func buildHelloPayload(cfg config.Config, pythonPath string) protocol.HelloPaylo
 	capabilities := []string{
 		"exec", "list_dir", "read_file", "write_file",
 		"edit_file", "grep", "delete_file", "move_file", "copy_file",
-		"upload_file", "download_file", "sysinfo",
+		"upload_file", "download_file",
 	}
 	if pythonPath != "" {
 		capabilities = append(capabilities, "exec_python")
@@ -71,7 +71,6 @@ func buildHelloPayload(cfg config.Config, pythonPath string) protocol.HelloPaylo
 	return protocol.HelloPayload{
 		Token:                cfg.Token,
 		Hostname:             hostname,
-		Alias:                cfg.Alias,
 		Platform:             cfg.Platform,
 		Arch:                 cfg.Arch,
 		AgentVersion:         "0.2.0",

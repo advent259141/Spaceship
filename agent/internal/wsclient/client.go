@@ -86,7 +86,6 @@ func (c *Client) runSession(ctx context.Context, cfg config.Config) error {
 	}
 	c.logger.Info("node.hello sent",
 		"node_id", cfg.NodeID,
-		"alias", cfg.Alias,
 	)
 
 	welcome, err := c.readWelcome(conn)

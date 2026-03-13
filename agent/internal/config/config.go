@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"spaceship/agent/internal/machineid"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,9 +23,8 @@ const defaultReconnectMaxDelay = 30 * time.Second
 // Config is the final, validated configuration used by the agent.
 type Config struct {
 	ServerURL         string
-	NodeID            string
+	NodeID            string // auto-generated from machine-id, not user-configurable
 	Token             string
-	Alias             string
 	LogLevel          string
 	HeartbeatInterval time.Duration
 	ReconnectMinDelay time.Duration
@@ -41,9 +42,7 @@ type Config struct {
 // distinguishing "not set" from zero values during merge.
 type FileConfig struct {
 	ServerURL      *string         `yaml:"server_url"`
-	NodeID         *string         `yaml:"node_id"`
 	Token          *string         `yaml:"token"`
-	Alias          *string         `yaml:"alias"`
 	LogLevel       *string         `yaml:"log_level"`
 	Heartbeat      *string         `yaml:"heartbeat_interval"`
 	Reconnect      *ReconnectYAML  `yaml:"reconnect"`
@@ -114,14 +113,12 @@ type flagResult struct {
 func parseFlags() flagResult {
 	var r flagResult
 
-	var server, nodeID, token, alias, logLevel, configFile string
+	var server, token, logLevel, configFile string
 
 	fs := flag.NewFlagSet("spaceship-agent", flag.ContinueOnError)
 	fs.StringVar(&configFile, "config", "", "Path to YAML config file (default: spaceship.yaml)")
 	fs.StringVar(&server, "server", "", "AstrBot gateway WebSocket URL")
-	fs.StringVar(&nodeID, "node-id", "", "Node ID")
 	fs.StringVar(&token, "token", "", "Bootstrap token")
-	fs.StringVar(&alias, "alias", "", "Node alias / display name")
 	fs.StringVar(&logLevel, "log-level", "", "Log level (debug, info, warn, error)")
 
 	// Silently ignore parse errors so unknown flags from test frameworks don't crash the agent.
@@ -131,14 +128,8 @@ func parseFlags() flagResult {
 	if server != "" {
 		r.ServerURL = &server
 	}
-	if nodeID != "" {
-		r.NodeID = &nodeID
-	}
 	if token != "" {
 		r.Token = &token
-	}
-	if alias != "" {
-		r.Alias = &alias
 	}
 	if logLevel != "" {
 		r.LogLevel = &logLevel
@@ -215,14 +206,8 @@ func loadEnvConfig() FileConfig {
 	if v := envStr("SPACESHIP_SERVER_URL"); v != "" {
 		fc.ServerURL = &v
 	}
-	if v := envStr("SPACESHIP_NODE_ID"); v != "" {
-		fc.NodeID = &v
-	}
 	if v := envStr("SPACESHIP_NODE_TOKEN"); v != "" {
 		fc.Token = &v
-	}
-	if v := envStr("SPACESHIP_NODE_ALIAS"); v != "" {
-		fc.Alias = &v
 	}
 	if v := envStr("SPACESHIP_LOG_LEVEL"); v != "" {
 		fc.LogLevel = &v
@@ -271,9 +256,7 @@ func merge(flag, env, yaml FileConfig) FileConfig {
 	var out FileConfig
 
 	out.ServerURL = coalesceStr(flag.ServerURL, env.ServerURL, yaml.ServerURL)
-	out.NodeID = coalesceStr(flag.NodeID, env.NodeID, yaml.NodeID)
 	out.Token = coalesceStr(flag.Token, env.Token, yaml.Token)
-	out.Alias = coalesceStr(flag.Alias, env.Alias, yaml.Alias)
 	out.LogLevel = coalesceStr(flag.LogLevel, env.LogLevel, yaml.LogLevel)
 	out.Heartbeat = coalesceStr(flag.Heartbeat, env.Heartbeat, yaml.Heartbeat)
 
@@ -345,11 +328,16 @@ func mergePython(layers ...*PythonYAML) *PythonYAML {
 // ---------------------------------------------------------------------------
 
 func buildConfig(fc FileConfig, yamlSource string) (Config, error) {
+	// Auto-generate node ID from machine identifier.
+	nodeID, err := machineid.NodeID()
+	if err != nil {
+		return Config{}, fmt.Errorf("failed to generate node_id: %w", err)
+	}
+
 	cfg := Config{
 		ServerURL:         derefStr(fc.ServerURL),
-		NodeID:            derefStr(fc.NodeID),
+		NodeID:            nodeID,
 		Token:             derefStr(fc.Token),
-		Alias:             derefStr(fc.Alias),
 		LogLevel:          derefStrOr(fc.LogLevel, "info"),
 		HeartbeatInterval: defaultHeartbeatInterval,
 		ReconnectMinDelay: defaultReconnectMinDelay,
@@ -405,14 +393,8 @@ func buildConfig(fc FileConfig, yamlSource string) (Config, error) {
 	if cfg.ServerURL == "" {
 		return Config{}, errors.New("server_url is required (set via --server, SPACESHIP_SERVER_URL, or config file)")
 	}
-	if cfg.NodeID == "" {
-		return Config{}, errors.New("node_id is required (set via --node-id, SPACESHIP_NODE_ID, or config file)")
-	}
 	if cfg.Token == "" {
 		return Config{}, errors.New("token is required (set via --token, SPACESHIP_NODE_TOKEN, or config file)")
-	}
-	if cfg.Alias == "" {
-		cfg.Alias = cfg.NodeID
 	}
 
 	// Config source for logging

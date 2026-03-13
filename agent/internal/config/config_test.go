@@ -10,9 +10,7 @@ import (
 func TestLoadYAML_FullConfig(t *testing.T) {
 	content := `
 server_url: ws://example.com/ws
-node_id: test-node
 token: secret123
-alias: Test Node
 log_level: debug
 heartbeat_interval: 15s
 reconnect:
@@ -29,9 +27,7 @@ python:
 	}
 
 	assertStrPtr(t, "ServerURL", fc.ServerURL, "ws://example.com/ws")
-	assertStrPtr(t, "NodeID", fc.NodeID, "test-node")
 	assertStrPtr(t, "Token", fc.Token, "secret123")
-	assertStrPtr(t, "Alias", fc.Alias, "Test Node")
 	assertStrPtr(t, "LogLevel", fc.LogLevel, "debug")
 	assertStrPtr(t, "Heartbeat", fc.Heartbeat, "15s")
 
@@ -53,7 +49,6 @@ python:
 func TestLoadYAML_PartialConfig(t *testing.T) {
 	content := `
 server_url: ws://partial.example.com/ws
-node_id: minimal
 token: tok
 `
 	path := writeTempYAML(t, content)
@@ -63,12 +58,8 @@ token: tok
 	}
 
 	assertStrPtr(t, "ServerURL", fc.ServerURL, "ws://partial.example.com/ws")
-	assertStrPtr(t, "NodeID", fc.NodeID, "minimal")
 	assertStrPtr(t, "Token", fc.Token, "tok")
 
-	if fc.Alias != nil {
-		t.Fatalf("Alias should be nil, got %q", *fc.Alias)
-	}
 	if fc.Reconnect != nil {
 		t.Fatal("Reconnect should be nil")
 	}
@@ -87,9 +78,7 @@ func TestLoadYAML_FileNotFound(t *testing.T) {
 func TestBuildConfig_FromYAML(t *testing.T) {
 	content := `
 server_url: ws://build.example.com/ws
-node_id: build-node
 token: build-token
-alias: Build Node
 heartbeat_interval: 10s
 reconnect:
   min_delay: 3s
@@ -109,14 +98,11 @@ reconnect:
 	if cfg.ServerURL != "ws://build.example.com/ws" {
 		t.Fatalf("ServerURL = %q", cfg.ServerURL)
 	}
-	if cfg.NodeID != "build-node" {
-		t.Fatalf("NodeID = %q", cfg.NodeID)
+	if cfg.NodeID == "" {
+		t.Fatal("NodeID should be auto-generated, got empty")
 	}
 	if cfg.Token != "build-token" {
 		t.Fatalf("Token = %q", cfg.Token)
-	}
-	if cfg.Alias != "Build Node" {
-		t.Fatalf("Alias = %q", cfg.Alias)
 	}
 	if cfg.HeartbeatInterval != 10*time.Second {
 		t.Fatalf("HeartbeatInterval = %v", cfg.HeartbeatInterval)
@@ -129,6 +115,29 @@ reconnect:
 	}
 	if cfg.ConfigSource != path {
 		t.Fatalf("ConfigSource = %q, want %q", cfg.ConfigSource, path)
+	}
+}
+
+func TestBuildConfig_NodeIDDeterministic(t *testing.T) {
+	url := "ws://test/ws"
+	tok := "tok"
+	fc := FileConfig{
+		ServerURL: &url,
+		Token:     &tok,
+	}
+	cfg1, err := buildConfig(fc, "")
+	if err != nil {
+		t.Fatalf("buildConfig 1st call failed: %v", err)
+	}
+	cfg2, err := buildConfig(fc, "")
+	if err != nil {
+		t.Fatalf("buildConfig 2nd call failed: %v", err)
+	}
+	if cfg1.NodeID != cfg2.NodeID {
+		t.Fatalf("NodeID should be deterministic: %q != %q", cfg1.NodeID, cfg2.NodeID)
+	}
+	if cfg1.NodeID == "" {
+		t.Fatal("NodeID should not be empty")
 	}
 }
 
@@ -162,32 +171,13 @@ func TestMerge_PriorityOrder(t *testing.T) {
 	assertStrPtr(t, "flag>env>yaml", result.ServerURL, "flag-value")
 }
 
-func TestBuildConfig_DefaultAlias(t *testing.T) {
-	url := "ws://test/ws"
-	id := "node-1"
-	tok := "tok"
-	fc := FileConfig{
-		ServerURL: &url,
-		NodeID:    &id,
-		Token:     &tok,
-	}
-	cfg, err := buildConfig(fc, "")
-	if err != nil {
-		t.Fatalf("buildConfig failed: %v", err)
-	}
-	if cfg.Alias != "node-1" {
-		t.Fatalf("Alias should default to NodeID, got %q", cfg.Alias)
-	}
-}
-
 func TestBuildConfig_MissingRequired(t *testing.T) {
 	cases := []struct {
 		name string
 		fc   FileConfig
 	}{
-		{"no server_url", FileConfig{NodeID: strPtr("n"), Token: strPtr("t")}},
-		{"no node_id", FileConfig{ServerURL: strPtr("ws://x"), Token: strPtr("t")}},
-		{"no token", FileConfig{ServerURL: strPtr("ws://x"), NodeID: strPtr("n")}},
+		{"no server_url", FileConfig{Token: strPtr("t")}},
+		{"no token", FileConfig{ServerURL: strPtr("ws://x")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

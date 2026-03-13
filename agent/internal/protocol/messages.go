@@ -41,7 +41,6 @@ type RawEnvelope struct {
 type HelloPayload struct {
 	Token                string   `json:"token"`
 	Hostname             string   `json:"hostname"`
-	Alias                string   `json:"alias"`
 	Platform             string   `json:"platform"`
 	Arch                 string   `json:"arch"`
 	AgentVersion         string   `json:"agent_version"`
