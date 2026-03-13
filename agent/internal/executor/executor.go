@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"time"
 
 	"spaceship/agent/internal/fileops"
@@ -429,6 +430,21 @@ func (d Dispatcher) Dispatch(ctx context.Context, task protocol.TaskSpec) (Resul
 			Stdout:     fmt.Sprintf("file %s uploaded", filePath),
 			DurationMS: time.Since(startedAt).Milliseconds(),
 		}, nil
+	case "sysinfo":
+		hostname, _ := os.Hostname()
+		cwd, _ := os.Getwd()
+		info := map[string]any{
+			"platform":   runtime.GOOS,
+			"arch":       runtime.GOARCH,
+			"hostname":   hostname,
+			"num_cpu":    runtime.NumCPU(),
+			"go_version": runtime.Version(),
+			"cwd":        cwd,
+			"pid":        os.Getpid(),
+		}
+		data, _ := json.MarshalIndent(info, "", "  ")
+		d.logger.Info("sysinfo task completed", "task_id", task.TaskID)
+		return Result{Stdout: string(data)}, nil
 	default:
 		err := fmt.Errorf("unsupported task type: %s", task.TaskType)
 		d.logger.Error("task dispatch failed",
